@@ -1,0 +1,41 @@
+{
+  "name": "recruitrain-admin-backend",
+  "version": "1.0.0",
+  "description": "RecruiTrain Admin & Super Admin Backend Service",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "bootstrap:admin": "node src/scripts/bootstrap-superadmin.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "argon2": "^0.41.1",
+    "connect-redis": "^7.1.1",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "express-rate-limit": "^7.4.1",
+    "express-session": "^1.18.1",
+    "helmet": "^7.2.0",
+    "ioredis": "^5.4.1",
+    "nodemailer": "^6.9.16",
+    "otplib": "^12.0.1",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "qrcode": "^1.5.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "prisma": "^5.22.0",
+    "supertest": "^7.0.0",
+    "vitest": "^2.1.4"
+  }
+}

@@ -1,0 +1,100 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+}
+
+enum AdminStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING_SETUP
+}
+
+enum AuditEventType {
+  LOGIN_SUCCESS
+  LOGIN_FAILURE
+  LOGOUT
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_RESET_COMPLETED
+  TWO_FACTOR_ENROLLED
+  TWO_FACTOR_VERIFIED
+  TWO_FACTOR_DISABLED
+  BACKUP_CODE_USED
+  BACKUP_CODES_REGENERATED
+  ACCOUNT_LOCKED
+  SESSION_REVOKED
+}
+
+model Admin {
+  id                  String               @id @default(uuid())
+  email               String               @unique
+  passwordHash        String
+  name                String
+  role                AdminRole            @default(ADMIN)
+  status              AdminStatus          @default(ACTIVE)
+  failedLoginAttempts Int                  @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
+  passwordChangedAt   DateTime?
+  totpSecret          String?
+  totpEnabled         Boolean              @default(false)
+  totpVerifiedAt      DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  passwordResetTokens PasswordResetToken[]
+  backupCodes         AdminBackupCode[]
+  auditLogs           AuthAuditLog[]
+
+  @@map("admins")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  adminId   String
+  admin     Admin     @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([tokenHash])
+  @@index([adminId, expiresAt])
+  @@map("password_reset_tokens")
+}
+
+model AdminBackupCode {
+  id        String    @id @default(uuid())
+  adminId   String
+  admin     Admin     @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([adminId, usedAt])
+  @@map("admin_backup_codes")
+}
+
+model AuthAuditLog {
+  id        String         @id @default(uuid())
+  adminId   String?
+  admin     Admin?         @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  eventType AuditEventType
+  ipAddress String?
+  userAgent String?
+  details   Json?
+  createdAt DateTime       @default(now())
+
+  @@index([adminId, createdAt])
+  @@index([eventType, createdAt])
+  @@map("auth_audit_logs")
+}
