@@ -4,9 +4,6 @@ import { logger } from './logger.js';
 
 let transporter = null;
 
-// In-memory record for testing/development inspection
-export const devMailbox = [];
-
 function getTransporter() {
   if (transporter) return transporter;
 
@@ -53,21 +50,12 @@ export async function sendPasswordResetEmail({ to, resetUrl, recipientName }) {
   `;
 
   if (!mailTransporter) {
-    if (env.NODE_ENV === 'production') {
-      logger.error('SMTP is not configured in production environment. Password reset email cannot be delivered.');
-      throw new Error('Email service is temporarily unavailable. Please contact the administrator.');
-    }
-
-    // In development or test, log safely and store in devMailbox
-    devMailbox.push({ to, resetUrl, sentAt: new Date() });
-    logger.warn(
-      {
-        to,
-        resetUrl,
-      },
-      '[DEV MAILBOX] SMTP is not configured. Reset link generated for local development testing'
-    );
-    return { success: true, delivered: false, localDevLink: resetUrl };
+    logger.warn({ to }, 'SMTP service is not configured. Reset email cannot be dispatched.');
+    return {
+      success: false,
+      delivered: false,
+      error: 'SMTP service is not configured in this environment. Password reset email cannot be delivered.',
+    };
   }
 
   try {
@@ -77,13 +65,10 @@ export async function sendPasswordResetEmail({ to, resetUrl, recipientName }) {
       subject,
       html,
     });
-    logger.info({ to, messageId: info.messageId }, 'Password reset email dispatched successfully');
+    logger.info({ to, messageId: info.messageId }, 'Password reset email dispatched successfully via SMTP');
     return { success: true, delivered: true, messageId: info.messageId };
   } catch (error) {
-    logger.error({ error: error.message, to }, 'Failed to send password reset email via SMTP');
-    if (env.NODE_ENV === 'production') {
-      throw new Error('Failed to deliver password reset email.');
-    }
+    logger.error({ error: error.message, to }, 'Failed to deliver password reset email via SMTP');
     return { success: false, delivered: false, error: error.message };
   }
 }

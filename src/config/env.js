@@ -2,18 +2,51 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { assertTestDatabase } from './dbSafetyGuard.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load .env from backend root
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+const isTest = process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
+
+if (isTest) {
+  process.env.NODE_ENV = 'test';
+  const explicitlyProvidedUrl = process.env.DATABASE_URL;
+  if (explicitlyProvidedUrl) {
+    // If caller explicitly set DATABASE_URL, assert it immediately before any env loading
+    assertTestDatabase(explicitlyProvidedUrl);
+  }
+  // Load .env.test (only override if an explicit test URL was not provided)
+  dotenv.config({ path: path.resolve(__dirname, '../../.env.test'), override: !explicitlyProvidedUrl });
+} else {
+  // Load .env from backend root
+  dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+}
+
+const defaultDatabaseUrl = isTest
+  ? 'postgresql://postgres:postgres@localhost:5432/recruitrain_admin_test?schema=public'
+  : 'postgresql://postgres:postgres@localhost:5432/recruitrain_admin?schema=public';
+
+const effectiveDatabaseUrl = process.env.DATABASE_URL || defaultDatabaseUrl;
+
+if (isTest) {
+  // Hard safety assertion: Abort immediately if database is not explicitly a test database
+  assertTestDatabase(effectiveDatabaseUrl);
+}
+
+const mfaEncryptionKey = process.env.MFA_ENCRYPTION_KEY || 'e15f27b0e2a966028848a85aa925ea70d33d7c6492e62e3fb433bf1c25e5b599';
+
+if (process.env.NODE_ENV === 'production' && (!process.env.MFA_ENCRYPTION_KEY || process.env.MFA_ENCRYPTION_KEY.length < 64)) {
+  throw new Error('MFA_ENCRYPTION_KEY must be a valid 32-byte hex string (64 characters) in production.');
+}
 
 export const env = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: parseInt(process.env.PORT || '5000', 10),
-  DATABASE_URL: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/recruitrain_admin?schema=public',
-  REDIS_URL: process.env.REDIS_URL || 'redis://localhost:6379',
+  DATABASE_URL: effectiveDatabaseUrl,
+  REDIS_URL: process.env.REDIS_URL || 'redis://127.0.0.1:6379',
   SESSION_SECRET: process.env.SESSION_SECRET || 'recruitrain-super-secure-session-secret-change-in-production-min32chars',
+  MFA_ENCRYPTION_KEY: mfaEncryptionKey,
   COOKIE_NAME: process.env.COOKIE_NAME || 'recruitrain_admin_sid',
   COOKIE_SECURE: process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production',
   COOKIE_SAME_SITE: process.env.COOKIE_SAME_SITE || 'lax',
@@ -23,10 +56,10 @@ export const env = {
     .filter(Boolean),
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
   
-  // Super Admin Bootstrap
-  SUPER_ADMIN_EMAIL: process.env.SUPER_ADMIN_EMAIL || 'admin@recruitrain.com',
+  // Super Admin Bootstrap (configured via environment or CLI flags)
+  SUPER_ADMIN_EMAIL: process.env.SUPER_ADMIN_EMAIL || '',
   SUPER_ADMIN_PASSWORD: process.env.SUPER_ADMIN_PASSWORD || '',
-  SUPER_ADMIN_NAME: process.env.SUPER_ADMIN_NAME || 'Super Administrator',
+  SUPER_ADMIN_NAME: process.env.SUPER_ADMIN_NAME || 'Platform Administrator',
 
   // Rate Limiting & Account Lockout
   LOGIN_MAX_FAILED_ATTEMPTS: parseInt(process.env.LOGIN_MAX_FAILED_ATTEMPTS || '5', 10),

@@ -8,110 +8,127 @@ let redisClient = null;
 let sessionStore = null;
 
 /**
- * Resilient Session Store
- * Dynamically routes to Redis when available, with automatic fallback to MemoryStore
+ * Ping Redis server to verify connectivity
  */
-class ResilientSessionStore extends session.Store {
-  constructor(redisStore, memoryStore, getRedisStatus) {
-    super();
-    this.redisStore = redisStore;
-    this.memoryStore = memoryStore;
-    this.getRedisStatus = getRedisStatus;
+export async function pingRedis() {
+  if (env.NODE_ENV === 'test') {
+    return 'PONG';
   }
 
-  get activeStore() {
-    if (this.redisStore && this.getRedisStatus() === 'ready') {
-      return this.redisStore;
-    }
-    return this.memoryStore;
+  if (!redisClient) {
+    throw new Error('Redis client has not been initialized');
   }
 
-  get(sid, fn) {
-    return this.activeStore.get(sid, fn);
+  if (redisClient.status !== 'ready') {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Redis connection timed out after 5 seconds')), 5000);
+      redisClient.once('ready', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      redisClient.once('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
   }
 
-  set(sid, sess, fn) {
-    return this.activeStore.set(sid, sess, fn);
-  }
-
-  destroy(sid, fn) {
-    return this.activeStore.destroy(sid, fn);
-  }
-
-  all(fn) {
-    if (this.activeStore.all) {
-      return this.activeStore.all(fn);
-    }
-    return fn(null, []);
-  }
-
-  clear(fn) {
-    if (this.activeStore.clear) {
-      return this.activeStore.clear(fn);
-    }
-    return fn && fn();
-  }
-
-  length(fn) {
-    if (this.activeStore.length) {
-      return this.activeStore.length(fn);
-    }
-    return fn(null, 0);
-  }
-
-  touch(sid, sess, fn) {
-    if (this.activeStore.touch) {
-      return this.activeStore.touch(sid, sess, fn);
-    }
-    return fn && fn();
+  try {
+    const response = await redisClient.ping();
+    return response;
+  } catch (error) {
+    throw new Error(`Redis connection check failed: ${error.message}`);
   }
 }
 
-export function initializeSessionStore() {
-  const memoryStore = new session.MemoryStore();
+/**
+ * Cleanly close Redis connection
+ */
+export async function closeRedis() {
+  if (redisClient && redisClient.status !== 'end') {
+    try {
+      await redisClient.quit();
+      logger.info('Redis connection cleanly terminated');
+    } catch (err) {
+      logger.warn({ error: err.message }, 'Error closing Redis client');
+    }
+  }
+}
 
-  if (env.NODE_ENV === 'test' || process.env.USE_REDIS === 'false') {
-    sessionStore = memoryStore;
+/**
+ * Invalidate all Redis sessions for a specific admin ID, optionally preserving one current session
+ */
+export async function revokeAdminSessions(adminId, client = redisClient, exceptSessionId = null) {
+  if (!client) return 0;
+  let cursor = '0';
+  let revokedCount = 0;
+  try {
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', 'recruitrain_sess:*', 'COUNT', 100);
+      cursor = nextCursor;
+      for (const key of keys) {
+        if (exceptSessionId && key.endsWith(exceptSessionId)) {
+          continue;
+        }
+        const raw = await client.get(key);
+        if (raw && (raw.includes(`"adminId":"${adminId}"`) || raw.includes(`"pendingAdminId":"${adminId}"`))) {
+          await client.del(key);
+          revokedCount++;
+        }
+      }
+    } while (cursor !== '0');
+  } catch (err) {
+    logger.warn({ error: err.message, adminId }, 'Failed to revoke admin Redis sessions');
+  }
+  return revokedCount;
+}
+
+/**
+ * Initialize session store:
+ * Strictly requires Redis in development and production environments.
+ * Strictly isolates in-memory session store to explicitly configured tests.
+ */
+export function initializeSessionStore() {
+  if (env.NODE_ENV === 'test') {
+    logger.info('Test environment: using isolated in-memory session store');
+    sessionStore = new session.MemoryStore();
     return { sessionStore, redisClient: null };
   }
 
   try {
     redisClient = new Redis(env.REDIS_URL, {
-      maxRetriesPerRequest: 1,
+      maxRetriesPerRequest: 3,
       retryStrategy(times) {
-        if (times > 2) return null; // stop reconnecting
-        return 1000;
+        if (times > 5) {
+          logger.error('Redis connection retries exhausted.');
+          return null;
+        }
+        return Math.min(times * 200, 2000);
       },
-      enableOfflineQueue: false,
+      enableOfflineQueue: true,
       lazyConnect: false,
     });
 
     redisClient.on('connect', () => {
-      logger.info('Connected to Redis server for session storage');
+      logger.info(`Connected to Redis server at ${env.REDIS_URL}`);
     });
 
     redisClient.on('ready', () => {
-      logger.info('Redis connection ready for session operations');
+      logger.info('Redis server is READY. Active session store: connect-redis');
     });
 
     redisClient.on('error', (err) => {
-      logger.warn({ error: err.message }, 'Redis server unavailable. Utilizing fallback session store.');
+      logger.error({ error: err.message, host: env.REDIS_URL }, 'Redis server error. Required session store failed.');
     });
 
-    const realRedisStore = new RedisStore({
+    sessionStore = new RedisStore({
       client: redisClient,
       prefix: 'recruitrain_sess:',
       disableTouch: false,
     });
-
-    sessionStore = new ResilientSessionStore(
-      realRedisStore,
-      memoryStore,
-      () => redisClient?.status
-    );
   } catch (error) {
-    logger.warn({ error: error.message }, 'Failed to initialize Redis. Using in-memory session store.');
-    sessionStore = memoryStore;
+    logger.error({ error: error.message }, 'Fatal error initializing Redis connection.');
+    throw new Error(`Failed to initialize required Redis session store: ${error.message}`);
   }
 
   return { sessionStore, redisClient };

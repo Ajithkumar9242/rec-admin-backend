@@ -4,6 +4,7 @@ import { validate } from '../../middleware/validate.js';
 import {
   authenticateSession,
   require2FAVerified,
+  requireMFAEnrollmentAccess,
 } from '../../middleware/auth.js';
 import {
   loginLimiter,
@@ -36,11 +37,19 @@ router.post('/reset-password', validate(resetPasswordSchema), AuthController.res
 
 // Session State & Logout
 router.get('/me', authenticateSession, AuthController.me);
-router.post('/logout', authenticateSession, AuthController.logout);
+router.post('/logout', AuthController.logout);
 
-// Two-Factor Authentication Management (Protected)
-router.post('/2fa/setup', authenticateSession, AuthController.setup2FA);
-router.post('/2fa/confirm', authenticateSession, validate(confirm2FASchema), AuthController.confirm2FA);
-router.post('/backup-codes/regenerate', authenticateSession, require2FAVerified, validate(regenerateBackupCodesSchema), AuthController.regenerateBackupCodes);
+// Two-Factor Authentication Enrollment (Accessible when enrollment required or when authenticated)
+router.post('/2fa/setup', requireMFAEnrollmentAccess, AuthController.setup2FA);
+router.post('/2fa/confirm', requireMFAEnrollmentAccess, validate(confirm2FASchema), AuthController.confirm2FA);
+
+// Backup Codes Management (Requires fully authenticated session with 2FA)
+router.post(
+  '/backup-codes/regenerate',
+  authenticateSession,
+  require2FAVerified,
+  validate(regenerateBackupCodesSchema),
+  AuthController.regenerateBackupCodes
+);
 
 export default router;

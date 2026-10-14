@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import argon2 from 'argon2';
+import { env } from '../config/env.js';
 
 /**
  * Hash password using Argon2id
@@ -21,6 +22,53 @@ export async function verifyPassword(hash, password) {
     return await argon2.verify(hash, password);
   } catch (error) {
     return false;
+  }
+}
+
+/**
+ * Authenticated Encryption for sensitive MFA/TOTP secrets using AES-256-GCM
+ */
+export function encryptTotpSecret(plainSecret) {
+  if (!plainSecret) return null;
+  const key = Buffer.from(env.MFA_ENCRYPTION_KEY, 'hex');
+  const iv = crypto.randomBytes(12); // Standard 96-bit IV for GCM
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  
+  const encrypted = Buffer.concat([cipher.update(plainSecret, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+
+  return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+/**
+ * Authenticated Decryption for sensitive MFA/TOTP secrets using AES-256-GCM
+ */
+export function decryptTotpSecret(ciphertext) {
+  if (!ciphertext) return null;
+  
+  // Format check: iv:tag:data
+  const parts = ciphertext.split(':');
+  if (parts.length !== 3) {
+    // If not matching encrypted format (e.g. legacy plain secret), return as-is
+    return ciphertext;
+  }
+
+  const [ivHex, tagHex, dataHex] = parts;
+  try {
+    const key = Buffer.from(env.MFA_ENCRYPTION_KEY, 'hex');
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(tagHex, 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(authTag);
+
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(dataHex, 'hex')),
+      decipher.final(),
+    ]);
+
+    return decrypted.toString('utf8');
+  } catch (error) {
+    throw new Error('Failed to decrypt authenticated MFA secret. Key mismatch or corrupted ciphertext.');
   }
 }
 
@@ -60,7 +108,7 @@ export function generateBackupCodes(count = 10) {
 }
 
 /**
- * Hash a backup code with SHA-256 (normalized to upper case, dashes removed)
+ * Hash a backup code with SHA-256 (normalized to upper case, non-alphanumeric removed)
  */
 export function hashBackupCode(code) {
   const normalized = code.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
@@ -75,7 +123,6 @@ export function safeCompare(a, b) {
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
   if (bufA.length !== bufB.length) {
-    // Constant time dummy compare to prevent length timing leaks
     crypto.timingSafeEqual(bufA, bufA);
     return false;
   }

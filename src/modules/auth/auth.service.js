@@ -8,6 +8,8 @@ import {
   hashToken,
   generateBackupCodes,
   hashBackupCode,
+  encryptTotpSecret,
+  decryptTotpSecret,
 } from '../../lib/crypto.js';
 import {
   generateTotpSecret,
@@ -15,8 +17,11 @@ import {
   verifyTotp,
 } from '../../lib/totp.js';
 import { sendPasswordResetEmail } from '../../lib/mailer.js';
+import { AuthState } from '../../middleware/auth.js';
+import { revokeAdminSessions } from '../../lib/redis.js';
 
-// Dummy hash to execute when account is not found (mitigates timing attacks)
+export const SESSION_ABSOLUTE_LIFETIME_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 const DUMMY_HASH = '$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$6+4jK82WcE0mOqj7Tf1L4XwN4x8aA9m1K1b4C3d2E5g';
 
 export class AuthService {
@@ -162,7 +167,7 @@ export class AuthService {
       throw error;
     }
 
-    // Password is valid - reset lockout counters
+    // Reset failed login attempts on valid password
     if (admin.failedLoginAttempts > 0 || admin.lockedUntil) {
       await prisma.admin.update({
         where: { id: admin.id },
@@ -173,47 +178,44 @@ export class AuthService {
       });
     }
 
-    // If 2FA is enrolled, prompt for 2FA verification
+    // If 2FA is enrolled, transition to PASSWORD_ACCEPTED_MFA_PENDING
     if (admin.totpEnabled) {
-      // Store temporary pending 2FA authentication in session
-      req.session.pending2FAAdminId = admin.id;
+      await this.regenerateSession(req);
+      req.session.authState = AuthState.PASSWORD_ACCEPTED_MFA_PENDING;
+      req.session.pendingAdminId = admin.id;
+      delete req.session.adminId;
+
       return {
+        state: AuthState.PASSWORD_ACCEPTED_MFA_PENDING,
         requires2FA: true,
         adminId: admin.id,
       };
     }
 
-    // No 2FA required: establish fully authenticated session
+    // If 2FA is NOT enrolled, mandatory enrollment transition
     await this.regenerateSession(req);
-    req.session.adminId = admin.id;
-    req.session.role = admin.role;
-    req.session.is2FAVerified = false;
-
-    await prisma.admin.update({
-      where: { id: admin.id },
-      data: { lastLoginAt: new Date() },
-    });
-
-    await this.recordAuditLog({
-      adminId: admin.id,
-      eventType: 'LOGIN_SUCCESS',
-      ipAddress,
-      userAgent,
-      details: { method: 'password' },
-    });
+    req.session.authState = AuthState.MFA_ENROLLMENT_REQUIRED;
+    req.session.pendingAdminId = admin.id;
+    delete req.session.adminId;
 
     return {
-      requires2FA: false,
-      user: this.sanitizeAdmin(admin, 0),
+      state: AuthState.MFA_ENROLLMENT_REQUIRED,
+      requiresMFAEnrollment: true,
+      adminId: admin.id,
     };
   }
 
   /**
-   * Verify TOTP 2FA during login
+   * Verify TOTP 2FA code during login
    */
   static async verify2FALogin({ adminId, code, ipAddress, userAgent, req }) {
-    // Check pending session or param
-    const effectiveAdminId = req.session?.pending2FAAdminId || adminId;
+    const effectiveAdminId = req.session?.pendingAdminId || adminId;
+
+    if (!effectiveAdminId) {
+      const error = new Error('No pending two-factor authentication challenge.');
+      error.status = 401;
+      throw error;
+    }
 
     const admin = await prisma.admin.findUnique({
       where: { id: effectiveAdminId },
@@ -225,7 +227,7 @@ export class AuthService {
     });
 
     if (!admin || !admin.totpEnabled || !admin.totpSecret) {
-      const error = new Error('Two-factor authentication is not configured for this account.');
+      const error = new Error('Two-factor authentication is not active on this account.');
       error.status = 400;
       throw error;
     }
@@ -236,7 +238,9 @@ export class AuthService {
       throw error;
     }
 
-    const isValid = verifyTotp(code, admin.totpSecret);
+    // Decrypt authenticated TOTP secret
+    const plainSecret = decryptTotpSecret(admin.totpSecret);
+    const isValid = verifyTotp(code, plainSecret);
 
     if (!isValid) {
       await this.recordAuditLog({
@@ -251,12 +255,15 @@ export class AuthService {
       throw error;
     }
 
-    // Successful 2FA - regenerate session and grant access
+    // Transition to AUTHENTICATED_MFA_VERIFIED
     await this.regenerateSession(req);
+    const now = Date.now();
+    req.session.authState = AuthState.AUTHENTICATED_MFA_VERIFIED;
     req.session.adminId = admin.id;
     req.session.role = admin.role;
-    req.session.is2FAVerified = true;
-    delete req.session.pending2FAAdminId;
+    req.session.authenticatedAt = now;
+    req.session.absoluteExpiresAt = now + SESSION_ABSOLUTE_LIFETIME_MS;
+    delete req.session.pendingAdminId;
 
     await prisma.admin.update({
       where: { id: admin.id },
@@ -280,15 +287,22 @@ export class AuthService {
     });
 
     return {
+      state: AuthState.AUTHENTICATED_MFA_VERIFIED,
       user: this.sanitizeAdmin(admin, admin.backupCodes.length),
     };
   }
 
   /**
-   * Recover login using single-use backup code
+   * Recover login using single-use emergency backup code (with atomic concurrency protection)
    */
   static async verifyBackupCodeLogin({ adminId, code, ipAddress, userAgent, req }) {
-    const effectiveAdminId = req.session?.pending2FAAdminId || adminId;
+    const effectiveAdminId = req.session?.pendingAdminId || adminId;
+
+    if (!effectiveAdminId) {
+      const error = new Error('No pending two-factor challenge found.');
+      error.status = 401;
+      throw error;
+    }
 
     const admin = await prisma.admin.findUnique({
       where: { id: effectiveAdminId },
@@ -302,43 +316,55 @@ export class AuthService {
 
     const hashedInput = hashBackupCode(code);
 
-    const backupCodeRecord = await prisma.adminBackupCode.findFirst({
-      where: {
-        adminId: admin.id,
-        codeHash: hashedInput,
-        usedAt: null,
-      },
+    // Atomic transaction with single-row update to strictly prevent concurrent replay
+    const consumedCode = await prisma.$transaction(async (tx) => {
+      const candidate = await tx.adminBackupCode.findFirst({
+        where: {
+          adminId: admin.id,
+          codeHash: hashedInput,
+          usedAt: null,
+        },
+      });
+
+      if (!candidate) return null;
+
+      const updateResult = await tx.adminBackupCode.updateMany({
+        where: {
+          id: candidate.id,
+          usedAt: null,
+        },
+        data: { usedAt: new Date() },
+      });
+
+      return updateResult.count === 1 ? candidate : null;
     });
 
-    if (!backupCodeRecord) {
+    if (!consumedCode) {
       await this.recordAuditLog({
         adminId: admin.id,
         eventType: 'LOGIN_FAILURE',
         ipAddress,
         userAgent,
-        details: { reason: 'invalid_backup_code' },
+        details: { reason: 'invalid_or_replayed_backup_code' },
       });
       const error = new Error('Invalid or already used backup code.');
       error.status = 400;
       throw error;
     }
 
-    // Mark single-use code as used atomically
-    await prisma.adminBackupCode.update({
-      where: { id: backupCodeRecord.id },
-      data: { usedAt: new Date() },
-    });
-
     const remainingCount = await prisma.adminBackupCode.count({
       where: { adminId: admin.id, usedAt: null },
     });
 
-    // Establish full session
+    // Establish verified session
     await this.regenerateSession(req);
+    const now = Date.now();
+    req.session.authState = AuthState.AUTHENTICATED_MFA_VERIFIED;
     req.session.adminId = admin.id;
     req.session.role = admin.role;
-    req.session.is2FAVerified = true;
-    delete req.session.pending2FAAdminId;
+    req.session.authenticatedAt = now;
+    req.session.absoluteExpiresAt = now + SESSION_ABSOLUTE_LIFETIME_MS;
+    delete req.session.pendingAdminId;
 
     await prisma.admin.update({
       where: { id: admin.id },
@@ -362,6 +388,7 @@ export class AuthService {
     });
 
     return {
+      state: AuthState.AUTHENTICATED_MFA_VERIFIED,
       user: this.sanitizeAdmin(admin, remainingCount),
       remainingBackupCodes: remainingCount,
     };
@@ -428,9 +455,9 @@ export class AuthService {
       where: { email: normalizedEmail },
     });
 
-    // Privacy preservation: always return success message regardless of existence
+    let mailResult = { success: true };
+
     if (admin && admin.status === 'ACTIVE') {
-      // Invalidate existing active tokens
       await prisma.passwordResetToken.deleteMany({
         where: { adminId: admin.id },
       });
@@ -449,7 +476,7 @@ export class AuthService {
 
       const resetUrl = `${env.FRONTEND_URL}/reset-password?token=${rawToken}`;
 
-      await sendPasswordResetEmail({
+      mailResult = await sendPasswordResetEmail({
         to: admin.email,
         resetUrl,
         recipientName: admin.name,
@@ -472,6 +499,8 @@ export class AuthService {
 
     return {
       message: 'If an active account exists with that email address, a password reset link has been dispatched.',
+      mailDelivered: mailResult.delivered,
+      ...(mailResult.error && { deliveryNotice: mailResult.error }),
     };
   }
 
@@ -512,7 +541,6 @@ export class AuthService {
         where: { id: resetTokenRecord.id },
         data: { usedAt: new Date() },
       }),
-      // Invalidate all tokens for this admin
       prisma.passwordResetToken.deleteMany({
         where: {
           adminId: resetTokenRecord.admin.id,
@@ -526,7 +554,11 @@ export class AuthService {
       eventType: 'PASSWORD_RESET_COMPLETED',
       ipAddress,
       userAgent,
+      details: { action: 'password_reset_via_token' },
     });
+
+    // Invalidate all active Redis sessions for this administrator
+    await revokeAdminSessions(resetTokenRecord.admin.id);
 
     return {
       message: 'Password has been successfully updated. You may now sign in with your new password.',
@@ -550,8 +582,8 @@ export class AuthService {
     const { secret, otpAuthUrl } = generateTotpSecret(admin.email);
     const qrCodeUrl = await generateQrCodeDataUrl(otpAuthUrl);
 
-    // Save candidate secret in session for verification
-    req.session.candidateTotpSecret = secret;
+    // Save encrypted candidate secret in session
+    req.session.candidateEncryptedTotpSecret = encryptTotpSecret(secret);
 
     return {
       secret,
@@ -563,15 +595,17 @@ export class AuthService {
    * Confirm 2FA enrollment and generate initial single-use backup codes
    */
   static async confirm2FAEnrollment({ adminId, code, ipAddress, userAgent, req }) {
-    const secret = req.session?.candidateTotpSecret;
+    const encryptedSecret = req.session?.candidateEncryptedTotpSecret;
 
-    if (!secret) {
+    if (!encryptedSecret) {
       const error = new Error('No pending 2FA enrollment found. Please restart setup.');
       error.status = 400;
       throw error;
     }
 
+    const secret = decryptTotpSecret(encryptedSecret);
     const isValid = verifyTotp(code, secret);
+
     if (!isValid) {
       const error = new Error('Invalid verification code. Please check your authenticator app and try again.');
       error.status = 400;
@@ -589,12 +623,11 @@ export class AuthService {
       prisma.admin.update({
         where: { id: adminId },
         data: {
-          totpSecret: secret,
+          totpSecret: encryptedSecret, // Stored encrypted with AES-256-GCM
           totpEnabled: true,
           totpVerifiedAt: new Date(),
         },
       }),
-      // Invalidate any old backup codes
       prisma.adminBackupCode.deleteMany({
         where: { adminId },
       }),
@@ -603,8 +636,18 @@ export class AuthService {
       }),
     ]);
 
-    delete req.session.candidateTotpSecret;
-    req.session.is2FAVerified = true;
+    delete req.session.candidateEncryptedTotpSecret;
+    delete req.session.pendingAdminId;
+
+    // Transition session to fully authenticated
+    await this.regenerateSession(req);
+    const freshAdmin = await prisma.admin.findUnique({ where: { id: adminId } });
+    const now = Date.now();
+    req.session.authState = AuthState.AUTHENTICATED_MFA_VERIFIED;
+    req.session.adminId = adminId;
+    req.session.role = freshAdmin.role;
+    req.session.authenticatedAt = now;
+    req.session.absoluteExpiresAt = now + SESSION_ABSOLUTE_LIFETIME_MS;
 
     await this.recordAuditLog({
       adminId,
@@ -614,6 +657,8 @@ export class AuthService {
     });
 
     return {
+      state: AuthState.AUTHENTICATED_MFA_VERIFIED,
+      user: this.sanitizeAdmin(freshAdmin, 10),
       message: 'Two-factor authentication successfully enabled.',
       backupCodes: plainBackupCodes,
     };
@@ -665,6 +710,7 @@ export class AuthService {
     return {
       message: 'Backup codes successfully regenerated. Previous codes are now invalid.',
       backupCodes: plainBackupCodes,
+      remainingBackupCodes: 10,
     };
   }
 }

@@ -75,7 +75,15 @@ export class AuthController {
       const user = await AuthService.getCurrentUser(req.admin.id);
       return res.status(200).json({
         success: true,
+        state: req.session.authState,
         user,
+        session: {
+          authenticatedAt: req.session.authenticatedAt || null,
+          absoluteExpiresAt: req.session.absoluteExpiresAt || null,
+          remainingSeconds: req.session.absoluteExpiresAt
+            ? Math.max(0, Math.floor((req.session.absoluteExpiresAt - Date.now()) / 1000))
+            : 0,
+        },
       });
     } catch (error) {
       next(error);
@@ -84,7 +92,7 @@ export class AuthController {
 
   static async logout(req, res, next) {
     try {
-      const adminId = req.session?.adminId;
+      const adminId = req.session?.adminId || req.session?.pendingAdminId;
       const ipAddress = req.ip || req.connection.remoteAddress;
       const userAgent = req.headers['user-agent'];
 
@@ -98,6 +106,7 @@ export class AuthController {
 
       return res.status(200).json({
         success: true,
+        state: 'UNAUTHENTICATED',
         message: 'Successfully logged out.',
       });
     } catch (error) {
@@ -150,7 +159,8 @@ export class AuthController {
 
   static async setup2FA(req, res, next) {
     try {
-      const result = await AuthService.start2FAEnrollment(req.admin.id, req);
+      const effectiveAdminId = req.enrollmentAdmin?.id || req.session?.pendingAdminId || req.admin?.id;
+      const result = await AuthService.start2FAEnrollment(effectiveAdminId, req);
       return res.status(200).json({
         success: true,
         ...result,
@@ -163,11 +173,12 @@ export class AuthController {
   static async confirm2FA(req, res, next) {
     try {
       const { code } = req.body;
+      const effectiveAdminId = req.enrollmentAdmin?.id || req.session?.pendingAdminId || req.admin?.id;
       const ipAddress = req.ip || req.connection.remoteAddress;
       const userAgent = req.headers['user-agent'];
 
       const result = await AuthService.confirm2FAEnrollment({
-        adminId: req.admin.id,
+        adminId: effectiveAdminId,
         code,
         ipAddress,
         userAgent,
