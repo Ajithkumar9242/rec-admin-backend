@@ -50,7 +50,7 @@ export const env = {
   COOKIE_NAME: process.env.COOKIE_NAME || 'recruitrain_admin_sid',
   COOKIE_SECURE: process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production',
   COOKIE_SAME_SITE: process.env.COOKIE_SAME_SITE || 'lax',
-  ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
+  ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000')
     .split(',')
     .map(origin => origin.trim())
     .filter(Boolean),

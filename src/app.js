@@ -32,7 +32,8 @@ export function createApp() {
         if (env.ALLOWED_ORIGINS.includes(origin) || env.NODE_ENV === 'test') {
           return callback(null, true);
         }
-        return callback(new Error(`Origin ${origin} not allowed by CORS`));
+        // Gracefully disallow origin without crashing the Express process
+        return callback(null, false);
       },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -73,6 +74,14 @@ export function createApp() {
 
   // API Routes
   app.use('/api', apiRoutes);
+
+  // 404 Handler for undefined API routes
+  app.use('/api', (req, res) => {
+    res.status(404).json({
+      success: false,
+      error: `Route not found: ${req.method} ${req.originalUrl}`,
+    });
+  });
 
   // Central Error Handler
   app.use(errorHandler);
