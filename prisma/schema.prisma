@@ -54,6 +54,7 @@ model Admin {
   passwordResetTokens PasswordResetToken[]
   backupCodes         AdminBackupCode[]
   auditLogs           AuthAuditLog[]
+  billingAuditLogs    BillingAuditLog[]
 
   @@map("admins")
 }
@@ -97,4 +98,231 @@ model AuthAuditLog {
   @@index([adminId, createdAt])
   @@index([eventType, createdAt])
   @@map("auth_audit_logs")
+}
+
+// ----------------------------------------------------
+// Phase 3: Billing & Subscriptions Enums and Models
+// ----------------------------------------------------
+
+enum PlanBillingInterval {
+  DAY
+  MONTHLY
+  YEARLY
+  ONE_TIME
+}
+
+enum PlanStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+  REVOKED
+  PAST_DUE
+  INCOMPLETE
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  OVERDUE
+  VOID
+  UNCOLLECTIBLE
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum CompanyStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Company {
+  id             String        @id @default(uuid())
+  name           String
+  legalName      String?
+  taxId          String?
+  billingEmail   String?
+  billingAddress String?
+  country        String        @default("DE")
+  status         CompanyStatus @default(ACTIVE)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  deletedAt      DateTime?
+
+  subscriptions       Subscription[]
+  invoices            Invoice[]
+  candidateAccessLogs CandidateAccessLog[]
+
+  @@index([name])
+  @@index([status])
+  @@map("companies")
+}
+
+model Plan {
+  id                   String              @id @default(uuid())
+  name                 String
+  description          String?
+  price                Decimal             @db.Decimal(10, 2)
+  offerPrice           Decimal?            @db.Decimal(10, 2)
+  currency             String              @default("EUR")
+  billingInterval      PlanBillingInterval
+  candidateAccessLimit Int                 @default(0)
+  jobPostingLimit      Int                 @default(0)
+  teamMemberLimit      Int                 @default(0)
+  status               PlanStatus          @default(ACTIVE)
+  stripePriceId        String?
+  stripeProductId      String?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  deletedAt            DateTime?
+
+  subscriptions Subscription[]
+
+  @@index([status])
+  @@index([billingInterval])
+  @@map("plans")
+}
+
+model Subscription {
+  id                      String              @id @default(uuid())
+  companyId               String
+  company                 Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  planId                  String
+  plan                    Plan                @relation(fields: [planId], references: [id], onDelete: Restrict)
+  status                  SubscriptionStatus  @default(ACTIVE)
+  startDate               DateTime
+  endDate                 DateTime?
+  nextBillingDate         DateTime?
+  billingInterval         PlanBillingInterval
+  currency                String              @default("EUR")
+  price                   Decimal             @db.Decimal(10, 2)
+  candidateAccessLimit    Int                 @default(0)
+  jobPostingLimit         Int                 @default(0)
+  teamMemberLimit         Int                 @default(0)
+  candidateAccessUsage    Int                 @default(0)
+  cancelledAt             DateTime?
+  cancellationReason      String?
+  revokedAt               DateTime?
+  revokedReason           String?
+  stripeCustomerId        String?
+  stripeSubscriptionId    String?
+  stripeCheckoutSessionId String?
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+
+  invoices            Invoice[]
+  candidateAccessLogs CandidateAccessLog[]
+
+  @@index([companyId, status])
+  @@index([status, endDate])
+  @@index([stripeSubscriptionId])
+  @@map("subscriptions")
+}
+
+model Invoice {
+  id                     String        @id @default(uuid())
+  invoiceNumber          String        @unique
+  companyId              String
+  company                Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  subscriptionId         String?
+  subscription           Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  issueDate              DateTime      @default(now())
+  dueDate                DateTime
+  paidDate               DateTime?
+  currency               String        @default("EUR")
+  netAmount              Decimal       @db.Decimal(10, 2)
+  taxRate                Decimal       @db.Decimal(5, 4)
+  taxAmount              Decimal       @db.Decimal(10, 2)
+  grossTotal             Decimal       @db.Decimal(10, 2)
+  status                 InvoiceStatus @default(OPEN)
+  legalNameSnapshot      String?
+  taxIdSnapshot          String?
+  billingAddressSnapshot String?
+  stripeInvoiceId        String?
+  stripePaymentIntentId  String?
+  voidReason             String?
+  voidedAt               DateTime?
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  payments Payment[]
+
+  @@index([companyId, status])
+  @@index([invoiceNumber])
+  @@index([status, dueDate])
+  @@index([stripeInvoiceId])
+  @@map("invoices")
+}
+
+model Payment {
+  id                    String        @id @default(uuid())
+  invoiceId             String
+  invoice               Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  amount                Decimal       @db.Decimal(10, 2)
+  currency              String        @default("EUR")
+  status                PaymentStatus @default(PENDING)
+  paymentMethod         String        @default("stripe")
+  stripePaymentIntentId String?
+  stripeChargeId        String?
+  errorMessage          String?
+  refundedAmount        Decimal?      @db.Decimal(10, 2)
+  paidAt                DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  @@index([invoiceId])
+  @@index([stripePaymentIntentId])
+  @@index([status])
+  @@map("payments")
+}
+
+model StripeWebhookEvent {
+  id          String   @id
+  type        String
+  status      String   @default("PROCESSED")
+  processedAt DateTime @default(now())
+
+  @@map("stripe_webhook_events")
+}
+
+model BillingAuditLog {
+  id         String   @id @default(uuid())
+  adminId    String?
+  admin      Admin?   @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  entityType String
+  entityId   String
+  action     String
+  actor      String
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([adminId, createdAt])
+  @@map("billing_audit_logs")
+}
+
+model CandidateAccessLog {
+  id             String       @id @default(uuid())
+  subscriptionId String
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  companyId      String
+  company        Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  amount         Int          @default(1)
+  reason         String?
+  createdAt      DateTime     @default(now())
+
+  @@index([subscriptionId, createdAt])
+  @@index([companyId, createdAt])
+  @@map("candidate_access_logs")
 }

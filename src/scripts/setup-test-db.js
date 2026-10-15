@@ -10,16 +10,19 @@ const __dirname = path.dirname(__filename);
 // Explicitly set test environment
 process.env.NODE_ENV = 'test';
 
-// If caller explicitly supplied a DATABASE_URL in the environment, validate it immediately
-if (process.env.DATABASE_URL) {
-  assertTestDatabase(process.env.DATABASE_URL);
-} else {
-  // Otherwise load from .env.test
-  dotenv.config({ path: path.resolve(__dirname, '../../.env.test'), override: true });
-}
+// Always load the single private local environment file backend/.env
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+
+// Target test database strictly from TEST_DATABASE_URL or explicitly provided test URL
+const testDbUrl =
+  process.env.TEST_DATABASE_URL ||
+  (process.env.DATABASE_URL && process.env.DATABASE_URL.includes('_test')
+    ? process.env.DATABASE_URL
+    : 'postgresql://postgres:postgres@localhost:5432/recruitrain_admin_test?schema=public');
+
+process.env.DATABASE_URL = testDbUrl;
 
 async function setupTestDatabase() {
-  const testDbUrl = process.env.DATABASE_URL;
   console.log('--- RecruiTrain Dedicated Test Database Setup ---');
 
   // Hard safety guard check: MUST be a valid test database

@@ -22,6 +22,18 @@ async function startServer() {
       logger.info(`API Base URL: http://localhost:${env.PORT}/api`);
     });
 
+    server.on('error', (err) => {
+      console.error('HTTP Server Error:', err);
+      logger.error({ error: err.message, stack: err.stack }, 'HTTP server error occurred');
+    });
+
+    server.on('clientError', (err, socket) => {
+      if (err.code === 'ECONNRESET' || !socket.writable) {
+        return;
+      }
+      socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+    });
+
     // Graceful shutdown handling
     async function shutdown(signal) {
       logger.info(`Received ${signal}. Gracefully shutting down...`);
@@ -36,7 +48,25 @@ async function startServer() {
 
     process.on('SIGTERM', () => shutdown('SIGTERM'));
     process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGBREAK', () => shutdown('SIGBREAK'));
+    process.on('SIGHUP', () => shutdown('SIGHUP'));
+
+    // Prevent stdin EOF on detached shells from exiting Node
+    if (process.stdin && !process.stdin.isTTY) {
+      process.stdin.resume();
+    }
+
+    process.on('uncaughtException', (err) => {
+      console.error('FATAL UNCAUGHT EXCEPTION:', err);
+      logger.fatal({ err: err?.stack || err }, 'Uncaught Exception in process');
+    });
+
+    process.on('unhandledRejection', (reason) => {
+      console.error('UNHANDLED REJECTION:', reason);
+      logger.error({ reason: reason?.stack || reason }, 'Unhandled Promise Rejection');
+    });
   } catch (err) {
+    console.error('FATAL STARTUP ERROR:', err);
     logger.fatal({ error: err.message }, 'Failed to start RecruiTrain Admin Backend.');
     await closeRedis();
     await prisma.$disconnect();
