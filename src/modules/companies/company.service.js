@@ -34,11 +34,12 @@ export class CompanyService {
     country,
     sortBy = 'createdAt',
     sortOrder = 'desc',
+    trashed = false,
   }) {
     const skip = (page - 1) * limit;
 
     const where = {
-      deletedAt: null,
+      deletedAt: trashed ? { not: null } : null,
     };
 
     if (status) {
@@ -63,8 +64,9 @@ export class CompanyService {
       ];
     }
 
-    const validSortFields = ['name', 'createdAt', 'status', 'companyCode', 'country', 'updatedAt'];
-    const orderField = validSortFields.includes(sortBy) ? sortBy : 'createdAt';
+    const validSortFields = ['name', 'createdAt', 'status', 'companyCode', 'country', 'updatedAt', 'deletedAt'];
+    const defaultSort = trashed ? 'deletedAt' : 'createdAt';
+    const orderField = validSortFields.includes(sortBy) ? sortBy : defaultSort;
     const orderDirection = sortOrder.toLowerCase() === 'asc' ? 'asc' : 'desc';
 
     const [total, items] = await Promise.all([

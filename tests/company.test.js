@@ -1029,6 +1029,25 @@ describe('RecruiTrain Phase 2: Employer/Company Management Integration Suite', (
       expect(listRes.status).toBe(200);
       expect(listRes.body.data.find((c) => c.id === trashCompany.id)).toBeUndefined();
 
+      // Verify GET /api/companies?trashed=true returns the soft-deleted company
+      const trashListRes = await request(app)
+        .get('/api/companies')
+        .query({ trashed: 'true', search: 'Trash Candidate GmbH' })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(trashListRes.status).toBe(200);
+      expect(trashListRes.body.data.find((c) => c.id === trashCompany.id)).toBeDefined();
+
+      // Verify status-summary includes TRASH count
+      const summaryRes = await request(app)
+        .get('/api/companies/status-summary')
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(summaryRes.status).toBe(200);
+      expect(summaryRes.body.data.TRASH).toBeGreaterThanOrEqual(1);
+
       // Verify update on soft-deleted company returns 404
       const updateTrashed = await request(app)
         .patch(`/api/companies/${trashCompany.id}`)
@@ -1037,6 +1056,55 @@ describe('RecruiTrain Phase 2: Employer/Company Management Integration Suite', (
         .send({ name: 'Cannot Update Deleted' });
 
       expect(updateTrashed.status).toBe(404);
+    });
+
+    it('restores soft-deleted company back to active directory and removes from trash list', async () => {
+      const trashedComp = await prisma.company.create({
+        data: {
+          name: 'Restore Roundtrip Corp',
+          companyCode: 'COMP-RESTORE-RT',
+          email: 'restore_rt@candidate.test',
+          country: 'DE',
+          status: 'INACTIVE',
+          deletedAt: new Date(),
+        },
+      });
+      createdCompanyIds.push(trashedComp.id);
+
+      // Verify listed in trash view
+      const inTrashRes = await request(app)
+        .get('/api/companies')
+        .query({ trashed: 'true', search: 'Restore Roundtrip Corp' })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+      expect(inTrashRes.status).toBe(200);
+      expect(inTrashRes.body.data.some((c) => c.id === trashedComp.id)).toBe(true);
+
+      // Restore
+      const restoreRes = await request(app)
+        .post(`/api/companies/${trashedComp.id}/restore`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.success).toBe(true);
+
+      // Verify no longer in trash view
+      const afterTrashRes = await request(app)
+        .get('/api/companies')
+        .query({ trashed: 'true', search: 'Restore Roundtrip Corp' })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+      expect(afterTrashRes.status).toBe(200);
+      expect(afterTrashRes.body.data.some((c) => c.id === trashedComp.id)).toBe(false);
+
+      // Verify now present in active directory
+      const activeListRes = await request(app)
+        .get('/api/companies')
+        .query({ search: 'Restore Roundtrip Corp' })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+      expect(activeListRes.status).toBe(200);
+      expect(activeListRes.body.data.some((c) => c.id === trashedComp.id)).toBe(true);
     });
 
     it('prevents permanent deletion (DELETE_PERMANENTLY) when company has dependent compliance documents', async () => {

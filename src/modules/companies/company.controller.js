@@ -26,11 +26,16 @@ export class CompanyController {
    */
   static async getStatusSummary(req, res, next) {
     try {
-      const counts = await prisma.company.groupBy({
-        by: ['status'],
-        where: { deletedAt: null },
-        _count: { id: true },
-      });
+      const [counts, trashedCount] = await Promise.all([
+        prisma.company.groupBy({
+          by: ['status'],
+          where: { deletedAt: null },
+          _count: { id: true },
+        }),
+        prisma.company.count({
+          where: { deletedAt: { not: null } },
+        }),
+      ]);
 
       const summary = {
         ALL: 0,
@@ -39,6 +44,7 @@ export class CompanyController {
         ACTIVE: 0,
         INACTIVE: 0,
         SUSPENDED: 0,
+        TRASH: trashedCount,
       };
 
       for (const item of counts) {

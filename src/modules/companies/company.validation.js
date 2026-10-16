@@ -39,8 +39,14 @@ export const listCompaniesSchema = {
     status: companyStatusEnum.optional(),
     industryId: z.string().uuid().optional(),
     country: z.string().trim().optional(),
-    sortBy: z.enum(['name', 'createdAt', 'status', 'companyCode', 'country', 'updatedAt']).default('createdAt'),
+    sortBy: z.enum(['name', 'createdAt', 'status', 'companyCode', 'country', 'updatedAt', 'deletedAt']).default('createdAt'),
     sortOrder: z.enum(['asc', 'desc']).default('desc'),
+    trashed: z
+      .preprocess((val) => {
+        if (typeof val === 'string') return val.toLowerCase() === 'true';
+        return Boolean(val);
+      }, z.boolean())
+      .default(false),
   }),
 };
 

@@ -85,10 +85,33 @@ export const env = {
     : (process.env.COOKIE_NAME || 'recruitrain_admin_sid'),
   COOKIE_SECURE: process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production',
   COOKIE_SAME_SITE: process.env.COOKIE_SAME_SITE || 'lax',
-  ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000')
-    .split(',')
-    .map(origin => origin.trim())
-    .filter(Boolean),
+  ALLOWED_ORIGINS: (() => {
+    const defaultOrigins = [
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://localhost:5174',
+      'http://127.0.0.1:5174',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+    ];
+    const origins = (process.env.ALLOWED_ORIGINS || defaultOrigins.join(','))
+      .split(',')
+      .map(origin => origin.trim())
+      .filter(Boolean);
+
+    try {
+      const empUrl = process.env.EMPLOYER_APP_URL || process.env.EMPLOYER_PORTAL_URL;
+      if (empUrl) {
+        const empOrigin = new URL(empUrl.trim()).origin;
+        if (!origins.includes(empOrigin)) {
+          origins.push(empOrigin);
+        }
+      }
+    } catch {
+      // Ignore URL parse errors here as validateEmployerAppUrl will handle validation
+    }
+    return origins;
+  })(),
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
   
   // Super Admin Bootstrap (configured via environment or CLI flags)
