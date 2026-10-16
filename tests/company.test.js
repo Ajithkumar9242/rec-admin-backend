@@ -1058,6 +1058,86 @@ describe('RecruiTrain Phase 2: Employer/Company Management Integration Suite', (
       expect(updateTrashed.status).toBe(404);
     });
 
+    it('supports GET /api/companies with sortBy=deletedAt&sortOrder=desc&trashed=true and orders recently trashed first', async () => {
+      const olderDate = new Date(Date.now() - 5 * 24 * 3600 * 1000); // 5 days ago
+      const newerDate = new Date(Date.now() - 1 * 3600 * 1000); // 1 hour ago
+
+      const olderTrashedComp = await prisma.company.create({
+        data: {
+          name: 'AAA Older Trashed Corp',
+          companyCode: 'COMP-TRASH-OLD',
+          email: 'old_trash@test.com',
+          country: 'DE',
+          status: 'INACTIVE',
+          deletedAt: olderDate,
+        },
+      });
+      createdCompanyIds.push(olderTrashedComp.id);
+
+      const newerTrashedComp = await prisma.company.create({
+        data: {
+          name: 'ZZZ Newer Trashed Corp',
+          companyCode: 'COMP-TRASH-NEW',
+          email: 'new_trash@test.com',
+          country: 'DE',
+          status: 'INACTIVE',
+          deletedAt: newerDate,
+        },
+      });
+      createdCompanyIds.push(newerTrashedComp.id);
+
+      // Query with sortBy=deletedAt&sortOrder=desc&trashed=true
+      const res = await request(app)
+        .get('/api/companies')
+        .query({
+          page: 1,
+          limit: 10,
+          sortBy: 'deletedAt',
+          sortOrder: 'desc',
+          trashed: 'true',
+        })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(Array.isArray(res.body.data)).toBe(true);
+
+      // Verify newer trashed company appears before older trashed company
+      const newIndex = res.body.data.findIndex((c) => c.id === newerTrashedComp.id);
+      const oldIndex = res.body.data.findIndex((c) => c.id === olderTrashedComp.id);
+
+      expect(newIndex).toBeGreaterThanOrEqual(0);
+      expect(oldIndex).toBeGreaterThanOrEqual(0);
+      expect(newIndex).toBeLessThan(oldIndex);
+
+      // Normal listing (without trashed=true) must NOT contain either trashed company
+      const activeRes = await request(app)
+        .get('/api/companies')
+        .query({ page: 1, limit: 100 })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(activeRes.status).toBe(200);
+      expect(activeRes.body.data.some((c) => c.id === olderTrashedComp.id)).toBe(false);
+      expect(activeRes.body.data.some((c) => c.id === newerTrashedComp.id)).toBe(false);
+    });
+
+    it('rejects invalid sortBy fields with HTTP 400', async () => {
+      const res = await request(app)
+        .get('/api/companies')
+        .query({
+          sortBy: 'unsupportedField',
+          trashed: 'true',
+        })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.issues?.some((i) => i.field === 'sortBy')).toBe(true);
+    });
+
     it('restores soft-deleted company back to active directory and removes from trash list', async () => {
       const trashedComp = await prisma.company.create({
         data: {

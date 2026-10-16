@@ -38,8 +38,9 @@ export class CompanyService {
   }) {
     const skip = (page - 1) * limit;
 
+    const isTrashed = trashed === true || trashed === 'true';
     const where = {
-      deletedAt: trashed ? { not: null } : null,
+      deletedAt: isTrashed ? { not: null } : null,
     };
 
     if (status) {
@@ -65,7 +66,7 @@ export class CompanyService {
     }
 
     const validSortFields = ['name', 'createdAt', 'status', 'companyCode', 'country', 'updatedAt', 'deletedAt'];
-    const defaultSort = trashed ? 'deletedAt' : 'createdAt';
+    const defaultSort = isTrashed ? 'deletedAt' : 'createdAt';
     const orderField = validSortFields.includes(sortBy) ? sortBy : defaultSort;
     const orderDirection = sortOrder.toLowerCase() === 'asc' ? 'asc' : 'desc';
 
