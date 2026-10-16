@@ -688,10 +688,11 @@ model Job {
   workArrangement    JobWorkArrangement @default(ON_SITE)
   employmentType     JobEmploymentType  @default(FULL_TIME)
   hiringScope        JobHiringScope     @default(DOMESTIC)
+  hiringScopes       JobHiringScope[]   @default([DOMESTIC])
   currency           String             @default("EUR")
   minSalary          Decimal?           @db.Decimal(10, 2)
   maxSalary          Decimal?           @db.Decimal(10, 2)
-  germanLevel        String             @default("B2")
+  germanLevel        String?
   englishLevel       String?
   otherLanguages     Json?
   description        String

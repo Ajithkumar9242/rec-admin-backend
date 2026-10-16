@@ -1014,4 +1014,310 @@ describe('Phase 4: Company-to-Hiring Integration & Candidate Discovery Suite', (
       expect(deleted).toBeNull();
     });
   });
+
+  describe('7. Multi-Select Hiring Scopes & Optional Language Requirements', () => {
+    let allScopesCompany;
+    let twoScopesCompany;
+    let domesticOnlyCompany;
+    let plan;
+
+    beforeAll(async () => {
+      plan = await prisma.plan.upsert({
+        where: { id: 'multi-scope-plan' },
+        update: { jobPostingLimit: 50, status: 'ACTIVE' },
+        create: {
+          id: 'multi-scope-plan',
+          name: 'Multi-Scope Quota Plan',
+          price: 199.0,
+          billingInterval: 'MONTHLY',
+          jobPostingLimit: 50,
+          status: 'ACTIVE',
+        },
+      });
+      createdPlanIds.push(plan.id);
+
+      allScopesCompany = await prisma.company.create({
+        data: {
+          name: 'All Scopes Global GmbH',
+          companyCode: 'ALL-SCOPES',
+          status: 'ACTIVE',
+          hiringDomestic: true,
+          hiringEu: true,
+          hiringInternational: true,
+        },
+      });
+      createdCompanyIds.push(allScopesCompany.id);
+
+      const sub1 = await prisma.subscription.create({
+        data: {
+          companyId: allScopesCompany.id,
+          planId: plan.id,
+          status: 'ACTIVE',
+          startDate: new Date(Date.now() - 24 * 3600 * 1000),
+          endDate: new Date(Date.now() + 30 * 24 * 3600 * 1000),
+          billingInterval: 'MONTHLY',
+          price: 199.0,
+          jobPostingLimit: 50,
+        },
+      });
+      createdSubIds.push(sub1.id);
+
+      twoScopesCompany = await prisma.company.create({
+        data: {
+          name: 'Two Scopes European AG',
+          companyCode: 'TWO-SCOPES',
+          status: 'ACTIVE',
+          hiringDomestic: true,
+          hiringEu: true,
+          hiringInternational: false,
+        },
+      });
+      createdCompanyIds.push(twoScopesCompany.id);
+
+      const sub2 = await prisma.subscription.create({
+        data: {
+          companyId: twoScopesCompany.id,
+          planId: plan.id,
+          status: 'ACTIVE',
+          startDate: new Date(Date.now() - 24 * 3600 * 1000),
+          endDate: new Date(Date.now() + 30 * 24 * 3600 * 1000),
+          billingInterval: 'MONTHLY',
+          price: 199.0,
+          jobPostingLimit: 50,
+        },
+      });
+      createdSubIds.push(sub2.id);
+
+      domesticOnlyCompany = await prisma.company.create({
+        data: {
+          name: 'Strictly Domestic KG',
+          companyCode: 'DOM-STRICT',
+          status: 'ACTIVE',
+          hiringDomestic: true,
+          hiringEu: false,
+          hiringInternational: false,
+        },
+      });
+      createdCompanyIds.push(domesticOnlyCompany.id);
+
+      const sub3 = await prisma.subscription.create({
+        data: {
+          companyId: domesticOnlyCompany.id,
+          planId: plan.id,
+          status: 'ACTIVE',
+          startDate: new Date(Date.now() - 24 * 3600 * 1000),
+          endDate: new Date(Date.now() + 30 * 24 * 3600 * 1000),
+          billingInterval: 'MONTHLY',
+          price: 199.0,
+          jobPostingLimit: 50,
+        },
+      });
+      createdSubIds.push(sub3.id);
+    });
+
+    it('allows a company with all 3 permissions enabled to select Domestic, EU-wide, and International simultaneously', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: allScopesCompany.id,
+          title: 'Global Principal Architect',
+          description: 'Multi-scope vacancy open across Germany, EU, and worldwide regions.',
+          hiringScopes: ['DOMESTIC', 'EU', 'INTERNATIONAL'],
+          status: 'PUBLISHED',
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.hiringScopes).toEqual(expect.arrayContaining(['DOMESTIC', 'EU', 'INTERNATIONAL']));
+      expect(res.body.data.hiringScopes.length).toBe(3);
+      createdJobIds.push(res.body.data.id);
+    });
+
+    it('rejects selecting a disabled scope (INTERNATIONAL) when company only has Domestic and EU enabled', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: twoScopesCompany.id,
+          title: 'Regional Operations Lead',
+          description: 'Role attempting unauthorized international scope.',
+          hiringScopes: ['DOMESTIC', 'INTERNATIONAL'],
+          status: 'DRAFT',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/not configured for international hiring/i);
+    });
+
+    it('rejects EU-wide and International scopes when company only has Domestic enabled', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: domesticOnlyCompany.id,
+          title: 'Local Branch Manager',
+          description: 'Role attempting unauthorized EU scope.',
+          hiringScopes: ['DOMESTIC', 'EU'],
+          status: 'DRAFT',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/not configured for EU hiring/i);
+    });
+
+    it('persists updated multiple scopes after saving and editing', async () => {
+      const createRes = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: allScopesCompany.id,
+          title: 'Cross-Border Staff Engineer',
+          description: 'Initial job vacancy created with domestic scope.',
+          hiringScopes: ['DOMESTIC'],
+          status: 'DRAFT',
+        });
+
+      expect(createRes.status).toBe(201);
+      const jobId = createRes.body.data.id;
+      createdJobIds.push(jobId);
+
+      // Update to multiple scopes
+      const updateRes = await request(app)
+        .put(`/api/jobs/${jobId}`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          hiringScopes: ['DOMESTIC', 'EU'],
+          title: 'Cross-Border Staff Engineer (Updated Scopes)',
+        });
+
+      expect(updateRes.status).toBe(200);
+      expect(updateRes.body.data.hiringScopes).toEqual(expect.arrayContaining(['DOMESTIC', 'EU']));
+      expect(updateRes.body.data.hiringScopes.length).toBe(2);
+
+      // Verify retrieval
+      const getRes = await request(app)
+        .get(`/api/jobs/${jobId}`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.data.hiringScopes).toEqual(expect.arrayContaining(['DOMESTIC', 'EU']));
+    });
+
+    it('public discovery matches multi-scope jobs by individual scope and respects company permissions', async () => {
+      const pubRes = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: allScopesCompany.id,
+          title: 'Public Multi-Scope Software Architect',
+          description: 'Public discovery search verification role for multi-scope filtering.',
+          hiringScopes: ['DOMESTIC', 'EU', 'INTERNATIONAL'],
+          status: 'PUBLISHED',
+        });
+
+      expect(pubRes.status).toBe(201);
+      const multiJobId = pubRes.body.data.id;
+      createdJobIds.push(multiJobId);
+
+      // Filter by EU hiring scope
+      const euSearch = await request(app).get('/api/jobs/public?hiringScope=EU');
+      expect(euSearch.status).toBe(200);
+      const foundInEu = euSearch.body.items.some((j) => j.id === multiJobId);
+      expect(foundInEu).toBe(true);
+
+      // Filter by INTERNATIONAL hiring scope
+      const intlSearch = await request(app).get('/api/jobs/public?hiringScope=INTERNATIONAL');
+      expect(intlSearch.status).toBe(200);
+      const foundInIntl = intlSearch.body.items.some((j) => j.id === multiJobId);
+      expect(foundInIntl).toBe(true);
+    });
+
+    it('allows saving a Draft with every language field completely empty', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: allScopesCompany.id,
+          title: 'Draft With No Language Requirements',
+          description: 'Draft job description without any language requirements specified.',
+          status: 'DRAFT',
+          // Omit germanLevel, englishLevel, otherLanguages
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.germanLevel).toBeNull();
+      expect(res.body.data.englishLevel).toBeNull();
+      createdJobIds.push(res.body.data.id);
+    });
+
+    it('allows publishing a valid job with every language field completely empty', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: allScopesCompany.id,
+          title: 'Published Vacancy With No Languages',
+          description: 'Published job opening that does not require any specific language certifications.',
+          hiringScopes: ['DOMESTIC'],
+          status: 'PUBLISHED',
+          germanLevel: null,
+          englishLevel: null,
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.status).toBe('PUBLISHED');
+      expect(res.body.data.germanLevel).toBeNull();
+      createdJobIds.push(res.body.data.id);
+    });
+
+    it('rejects invalid language proficiency values when supplied', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: allScopesCompany.id,
+          title: 'Job With Invalid Proficiency',
+          description: 'Job description trying invalid CEFR level.',
+          germanLevel: 'INVALID_CEFR_LEVEL',
+          status: 'DRAFT',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('backward compatibility: existing single-scope job retains single hiringScope and maps to hiringScopes', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: domesticOnlyCompany.id,
+          title: 'Legacy Format Domestic Job',
+          description: 'Testing backward compatibility with single hiringScope string.',
+          hiringScope: 'DOMESTIC',
+          status: 'DRAFT',
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.hiringScope).toBe('DOMESTIC');
+      expect(res.body.data.hiringScopes).toEqual(['DOMESTIC']);
+      createdJobIds.push(res.body.data.id);
+    });
+  });
 });

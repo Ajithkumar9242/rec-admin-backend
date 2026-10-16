@@ -38,7 +38,11 @@ export class JobService {
     const where = {
       deletedAt: isTrashed ? { not: null } : null,
       ...(status ? { status } : {}),
-      ...(hiringScope ? { hiringScope } : {}),
+      ...(hiringScope
+        ? {
+            OR: [{ hiringScope }, { hiringScopes: { has: hiringScope } }],
+          }
+        : {}),
       ...(employmentType ? { employmentType } : {}),
       ...(workArrangement ? { workArrangement } : {}),
       ...(companyId ? { companyId } : {}),
@@ -148,7 +152,7 @@ export class JobService {
    * subscription quotas, and platform auto-approval policy.
    */
   static async createJob(jobData, actorContext = {}) {
-    const { companyId, hiringScope = 'DOMESTIC', status = 'DRAFT' } = jobData;
+    const { companyId, status = 'DRAFT' } = jobData;
 
     // 1. Validate company exists, is not in trash, and is eligible
     const company = await prisma.company.findUnique({
@@ -172,20 +176,42 @@ export class JobService {
       throw createHttpError('Cannot post jobs for a company currently in trash.', 400);
     }
 
-    // 2. Validate Job Hiring Scope against Company hiring capabilities
-    if (hiringScope === 'DOMESTIC' && !company.hiringDomestic) {
+    // 2. Resolve and Validate Job Hiring Scope(s) against Company hiring capabilities
+    let rawScopes = jobData.hiringScopes !== undefined ? jobData.hiringScopes : jobData.hiringScope;
+    let scopes = [];
+    if (Array.isArray(rawScopes)) {
+      scopes = [...new Set(rawScopes.filter(Boolean))];
+    } else if (rawScopes) {
+      scopes = [rawScopes];
+    } else {
+      scopes = ['DOMESTIC'];
+    }
+
+    if (scopes.length === 0) {
+      throw createHttpError('At least one valid hiring scope must be selected.', 400);
+    }
+
+    // Check if company has no scopes permitted at all
+    if (!company.hiringDomestic && !company.hiringEu && !company.hiringInternational) {
+      throw createHttpError(
+        'Selected company has no active hiring scopes permitted. Update company configuration before posting jobs.',
+        400
+      );
+    }
+
+    if (scopes.includes('DOMESTIC') && !company.hiringDomestic) {
       throw createHttpError(
         'Company is not configured for domestic hiring. Update company preferences before posting domestic roles.',
         400
       );
     }
-    if (hiringScope === 'EU' && !company.hiringEu) {
+    if (scopes.includes('EU') && !company.hiringEu) {
       throw createHttpError(
         'Company is not configured for EU hiring. Update company preferences before posting EU roles.',
         400
       );
     }
-    if (hiringScope === 'INTERNATIONAL' && !company.hiringInternational) {
+    if (scopes.includes('INTERNATIONAL') && !company.hiringInternational) {
       throw createHttpError(
         'Company is not configured for international hiring. Update company preferences before posting international roles.',
         400
@@ -242,6 +268,10 @@ export class JobService {
       const job = await tx.job.create({
         data: {
           ...jobData,
+          hiringScope: scopes[0] || 'DOMESTIC',
+          hiringScopes: scopes,
+          germanLevel: jobData.germanLevel || null,
+          englishLevel: jobData.englishLevel || null,
           status: effectiveStatus,
           publishedAt: effectiveStatus === 'PUBLISHED' ? new Date() : null,
           approvedAt,
@@ -424,14 +454,30 @@ export class JobService {
     }
 
     // Verify hiring scope updates against company capabilities
-    const newScope = updateData.hiringScope || existingJob.hiringScope;
-    if (newScope === 'DOMESTIC' && !company.hiringDomestic) {
+    let updatedScopes = existingJob.hiringScopes && existingJob.hiringScopes.length > 0
+      ? existingJob.hiringScopes
+      : (existingJob.hiringScope ? [existingJob.hiringScope] : ['DOMESTIC']);
+
+    if (updateData.hiringScopes !== undefined || updateData.hiringScope !== undefined) {
+      const rawScopes = updateData.hiringScopes !== undefined ? updateData.hiringScopes : updateData.hiringScope;
+      if (Array.isArray(rawScopes)) {
+        updatedScopes = [...new Set(rawScopes.filter(Boolean))];
+      } else if (rawScopes) {
+        updatedScopes = [rawScopes];
+      }
+    }
+
+    if (updatedScopes.length === 0) {
+      throw createHttpError('At least one valid hiring scope must be selected.', 400);
+    }
+
+    if (updatedScopes.includes('DOMESTIC') && !company.hiringDomestic) {
       throw createHttpError('Company is not configured for domestic hiring.', 400);
     }
-    if (newScope === 'EU' && !company.hiringEu) {
+    if (updatedScopes.includes('EU') && !company.hiringEu) {
       throw createHttpError('Company is not configured for EU hiring.', 400);
     }
-    if (newScope === 'INTERNATIONAL' && !company.hiringInternational) {
+    if (updatedScopes.includes('INTERNATIONAL') && !company.hiringInternational) {
       throw createHttpError('Company is not configured for international hiring.', 400);
     }
 
@@ -478,6 +524,10 @@ export class JobService {
       where: { id },
       data: {
         ...updateData,
+        hiringScope: updatedScopes[0] || 'DOMESTIC',
+        hiringScopes: updatedScopes,
+        ...(updateData.germanLevel !== undefined ? { germanLevel: updateData.germanLevel || null } : {}),
+        ...(updateData.englishLevel !== undefined ? { englishLevel: updateData.englishLevel || null } : {}),
         ...(statusToSet ? { status: statusToSet } : {}),
         ...(statusToSet === 'PUBLISHED' && !existingJob.publishedAt ? { publishedAt: new Date() } : {}),
         approvedAt,
@@ -756,7 +806,11 @@ export class JobService {
       companyId,
       deletedAt: null,
       ...(status ? { status } : {}),
-      ...(hiringScope ? { hiringScope } : {}),
+      ...(hiringScope
+        ? {
+            OR: [{ hiringScope }, { hiringScopes: { has: hiringScope } }],
+          }
+        : {}),
       ...(search
         ? {
             OR: [
@@ -828,7 +882,14 @@ export class JobService {
       ...(city ? { city: { contains: city, mode: 'insensitive' } } : {}),
       ...(workArrangement ? { workArrangement } : {}),
       ...(employmentType ? { employmentType } : {}),
-      ...(hiringScope ? { hiringScope } : {}),
+      ...(hiringScope
+        ? {
+            OR: [{ hiringScope }, { hiringScopes: { has: hiringScope } }],
+            ...(hiringScope === 'DOMESTIC' ? { company: { hiringDomestic: true } } : {}),
+            ...(hiringScope === 'EU' ? { company: { hiringEu: true } } : {}),
+            ...(hiringScope === 'INTERNATIONAL' ? { company: { hiringInternational: true } } : {}),
+          }
+        : {}),
       ...(search
         ? {
             OR: [
@@ -861,6 +922,9 @@ export class JobService {
           workArrangement: true,
           employmentType: true,
           hiringScope: true,
+          hiringScopes: true,
+          germanLevel: true,
+          englishLevel: true,
           currency: true,
           minSalary: true,
           maxSalary: true,
@@ -880,6 +944,9 @@ export class JobService {
               phone: true,
               billingEmail: true,
               billingAddress: true,
+              hiringDomestic: true,
+              hiringEu: true,
+              hiringInternational: true,
             },
           },
         },
@@ -887,10 +954,21 @@ export class JobService {
     ]);
 
     // Sanitize employer contact information per platform visibility policy
-    const items = rawJobs.map((job) => ({
-      ...job,
-      company: enforceEmployerContactVisibility(job.company, platformSettings),
-    }));
+    // and ensure visible job scopes respect current company permissions
+    const items = rawJobs.map((job) => {
+      const allowedScopes = (job.hiringScopes && job.hiringScopes.length > 0 ? job.hiringScopes : [job.hiringScope]).filter((scope) => {
+        if (scope === 'DOMESTIC') return job.company.hiringDomestic;
+        if (scope === 'EU') return job.company.hiringEu;
+        if (scope === 'INTERNATIONAL') return job.company.hiringInternational;
+        return true;
+      });
+      return {
+        ...job,
+        hiringScopes: allowedScopes,
+        hiringScope: allowedScopes[0] || job.hiringScope,
+        company: enforceEmployerContactVisibility(job.company, platformSettings),
+      };
+    });
 
     return {
       items,
@@ -937,6 +1015,9 @@ export class JobService {
         workArrangement: true,
         employmentType: true,
         hiringScope: true,
+        hiringScopes: true,
+        germanLevel: true,
+        englishLevel: true,
         currency: true,
         minSalary: true,
         maxSalary: true,
@@ -957,6 +1038,9 @@ export class JobService {
             phone: true,
             billingEmail: true,
             billingAddress: true,
+            hiringDomestic: true,
+            hiringEu: true,
+            hiringInternational: true,
           },
         },
       },
@@ -966,8 +1050,17 @@ export class JobService {
       throw createHttpError('Job posting not found, expired, or unavailable.', 404);
     }
 
+    const allowedScopes = (job.hiringScopes && job.hiringScopes.length > 0 ? job.hiringScopes : [job.hiringScope]).filter((scope) => {
+      if (scope === 'DOMESTIC') return job.company.hiringDomestic;
+      if (scope === 'EU') return job.company.hiringEu;
+      if (scope === 'INTERNATIONAL') return job.company.hiringInternational;
+      return true;
+    });
+
     return {
       ...job,
+      hiringScopes: allowedScopes,
+      hiringScope: allowedScopes[0] || job.hiringScope,
       company: enforceEmployerContactVisibility(job.company, platformSettings),
     };
   }
