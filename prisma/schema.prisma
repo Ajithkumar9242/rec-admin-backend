@@ -55,6 +55,8 @@ model Admin {
   backupCodes         AdminBackupCode[]
   auditLogs           AuthAuditLog[]
   billingAuditLogs    BillingAuditLog[]
+  platformConfigAuditLogs PlatformConfigAuditLog[]
+  companyAuditLogs    CompanyAuditLog[]
 
   @@map("admins")
 }
@@ -143,29 +145,83 @@ enum PaymentStatus {
 }
 
 enum CompanyStatus {
+  IN_REVIEW
+  UNVERIFIED
   ACTIVE
   INACTIVE
+  SUSPENDED
 }
 
 model Company {
-  id             String        @id @default(uuid())
-  name           String
-  legalName      String?
-  taxId          String?
-  billingEmail   String?
-  billingAddress String?
-  country        String        @default("DE")
-  status         CompanyStatus @default(ACTIVE)
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  deletedAt      DateTime?
+  id                    String        @id @default(uuid())
+  name                  String
+  legalName             String?
+  taxId                 String?
+  companyCode           String?       @unique
+  registrationNumber    String?
+  billingEmail          String?
+  billingAddress        String?
+  country               String        @default("DE")
+  status                CompanyStatus @default(IN_REVIEW)
 
-  subscriptions       Subscription[]
-  invoices            Invoice[]
-  candidateAccessLogs CandidateAccessLog[]
+  // Identity & Overview
+  industryId            String?
+  industry              Industry?     @relation(fields: [industryId], references: [id], onDelete: SetNull)
+  subIndustryId         String?
+  companySize           String?       // '1-10', '11-50', '51-200', '201-500', '501-1000', '1000+'
+  foundedYear           Int?
+  description           String?
+  hiringDomestic        Boolean       @default(true)
+  hiringInternational   Boolean       @default(false)
+  hiringEu              Boolean       @default(false)
+
+  // Contact Details
+  email                 String?
+  hrEmail               String?
+  supportEmail          String?
+  phone                 String?
+  alternatePhone        String?
+  website               String?
+
+  // Address
+  addressLine1          String?
+  addressLine2          String?
+  city                  String?
+  state                 String?
+  postalCode            String?
+
+  // Branding Assets (Cloudinary)
+  logoUrl               String?
+  logoPublicId          String?
+  bannerUrl             String?
+  bannerPublicId        String?
+  promoVideoUrl         String?
+  promoVideoPublicId    String?
+
+  // Verification & Review Metadata
+  reviewedAt            DateTime?
+  reviewedBy            String?
+  reviewNotes           String?
+  rejectionReason       String?
+  suspensionReason      String?
+
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  deletedAt             DateTime?
+
+  subscriptions         Subscription[]
+  invoices              Invoice[]
+  candidateAccessLogs   CandidateAccessLog[]
+  documents             CompanyDocument[]
+  users                 CompanyUser[]
+  invitations           CompanyInvitation[]
+  auditLogs             CompanyAuditLog[]
+  jobs                  Job[]
 
   @@index([name])
   @@index([status])
+  @@index([industryId])
+  @@index([email])
   @@map("companies")
 }
 
@@ -326,3 +382,374 @@ model CandidateAccessLog {
   @@index([companyId, createdAt])
   @@map("candidate_access_logs")
 }
+
+// ----------------------------------------------------
+// Phase 1: Platform Configuration Enums and Models
+// ----------------------------------------------------
+
+enum ConfigurationStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum DocumentTargetType {
+  COMPANY
+  CANDIDATE
+}
+
+enum StageCategory {
+  SOURCING
+  SCREENING
+  INTERVIEW
+  EVALUATION
+  OFFER
+  HIRED
+  REJECTED
+  OTHER
+}
+
+model Industry {
+  id          String              @id @default(uuid())
+  name        String
+  code        String?
+  description String?
+  parentId    String?
+  parent      Industry?           @relation("IndustryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children    Industry[]          @relation("IndustryHierarchy")
+  companies   Company[]
+  status      ConfigurationStatus @default(ACTIVE)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  deletedAt   DateTime?
+  deletedBy   String?
+
+  @@unique([name, parentId])
+  @@index([parentId])
+  @@index([status])
+  @@index([name])
+  @@map("industries")
+}
+
+model DocumentDefinition {
+  id                String              @id @default(uuid())
+  targetType        DocumentTargetType
+  name              String
+  code              String?
+  description       String?
+  isRequired        Boolean             @default(false)
+  acceptedFileTypes String[]
+  maxFileSizeMb     Int                 @default(10)
+  status            ConfigurationStatus @default(ACTIVE)
+  companyDocuments  CompanyDocument[]
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  deletedAt         DateTime?
+  deletedBy         String?
+
+  @@unique([targetType, name])
+  @@index([targetType, status])
+  @@map("document_definitions")
+}
+
+model RecruitmentStage {
+  id          String              @id @default(uuid())
+  name        String              @unique
+  description String?
+  category    StageCategory       @default(SCREENING)
+  order       Int                 @default(0)
+  status      ConfigurationStatus @default(ACTIVE)
+  isSystem    Boolean             @default(false)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  deletedAt   DateTime?
+  deletedBy   String?
+
+  jobApplications JobApplication[]
+
+  @@index([order])
+  @@index([status])
+  @@map("recruitment_stages")
+}
+
+model PlatformSetting {
+  id                           String   @id @default("global")
+  acceptedResumeFileTypes      String[] @default(["application/pdf", ".pdf", "application/msword", ".doc", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"])
+  autoApproveCandidateProfiles Boolean  @default(false)
+  showEmployerContactDetails   Boolean  @default(false)
+  showCandidateResumes         Boolean  @default(true)
+  showCandidateFullName        Boolean  @default(true)
+  showCandidateEmail           Boolean  @default(false)
+  showCandidatePhone           Boolean  @default(false)
+  autoApproveJobs              Boolean  @default(false)
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
+  updatedBy                    String?
+
+  @@map("platform_settings")
+}
+
+model PlatformConfigAuditLog {
+  id         String   @id @default(uuid())
+  adminId    String?
+  admin      Admin?   @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  entityType String
+  entityId   String
+  action     String
+  actor      String
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([adminId, createdAt])
+  @@map("platform_config_audit_logs")
+}
+
+// ----------------------------------------------------
+// Phase 2: Employer/Company Management Models
+// ----------------------------------------------------
+
+enum DocumentReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model CompanyDocument {
+  id                    String                @id @default(uuid())
+  companyId             String
+  company               Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  documentDefinitionId  String?
+  documentDefinition    DocumentDefinition?   @relation(fields: [documentDefinitionId], references: [id], onDelete: SetNull)
+  name                  String
+  fileUrl               String
+  publicId              String?
+  fileSizeBytes         Int?
+  mimeType              String?
+  isPrivate             Boolean               @default(true)
+  reviewStatus          DocumentReviewStatus  @default(PENDING)
+  reviewedAt            DateTime?
+  reviewedBy            String?
+  rejectionReason       String?
+  uploadedAt            DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  @@index([companyId])
+  @@index([documentDefinitionId])
+  @@index([reviewStatus])
+  @@map("company_documents")
+}
+
+enum CompanyUserRole {
+  OWNER
+  ADMIN
+  RECRUITER
+  MEMBER
+}
+
+enum CompanyUserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+  DEACTIVATED
+}
+
+model CompanyUser {
+  id                    String            @id @default(uuid())
+  companyId             String
+  company               Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  email                 String
+  firstName             String?
+  lastName              String?
+  role                  CompanyUserRole   @default(ADMIN)
+  status                CompanyUserStatus @default(INVITED)
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  invitations           CompanyInvitation[]
+
+  @@unique([companyId, email])
+  @@index([companyId])
+  @@index([email])
+  @@map("company_users")
+}
+
+model CompanyInvitation {
+  id          String          @id @default(uuid())
+  companyId   String
+  company     Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId      String?
+  user        CompanyUser?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email       String
+  role        CompanyUserRole @default(ADMIN)
+  tokenHash   String          @unique
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  sentAt      DateTime        @default(now())
+  createdAt   DateTime        @default(now())
+
+  @@index([companyId])
+  @@index([email])
+  @@index([tokenHash])
+  @@map("company_invitations")
+}
+
+model CompanyAuditLog {
+  id         String   @id @default(uuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  adminId    String?
+  admin      Admin?   @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  action     String
+  actor      String
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([adminId, createdAt])
+  @@map("company_audit_logs")
+}
+
+// ----------------------------------------------------
+// Phase 4: Job Postings, Candidates, and Applications
+// ----------------------------------------------------
+
+enum JobWorkArrangement {
+  REMOTE
+  HYBRID
+  ON_SITE
+}
+
+enum JobEmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  INTERNSHIP
+}
+
+enum JobHiringScope {
+  DOMESTIC
+  EU
+  INTERNATIONAL
+}
+
+enum JobStatus {
+  DRAFT
+  PENDING_APPROVAL
+  PUBLISHED
+  CLOSED
+  ARCHIVED
+}
+
+enum CandidateStatus {
+  PENDING_APPROVAL
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum ApplicationStatus {
+  SUBMITTED
+  IN_REVIEW
+  SHORTLISTED
+  INTERVIEW
+  OFFER
+  HIRED
+  REJECTED
+}
+
+model Job {
+  id              String             @id @default(uuid())
+  companyId       String
+  company         Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  title           String
+  slug            String?
+  description     String
+  requirements    String?
+  benefits        String?
+  department      String?
+  location        String?
+  country         String             @default("DE")
+  city            String?
+  workArrangement JobWorkArrangement @default(ON_SITE)
+  employmentType  JobEmploymentType  @default(FULL_TIME)
+  hiringScope     JobHiringScope     @default(DOMESTIC)
+  currency        String             @default("EUR")
+  minSalary       Decimal?           @db.Decimal(10, 2)
+  maxSalary       Decimal?           @db.Decimal(10, 2)
+  status          JobStatus          @default(DRAFT)
+  publishedAt     DateTime?
+  expiresAt       DateTime?
+  createdById     String?
+  approvedAt      DateTime?
+  approvedBy      String?
+  rejectionReason String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  deletedAt       DateTime?
+
+  applications    JobApplication[]
+
+  @@index([companyId])
+  @@index([status])
+  @@index([hiringScope])
+  @@index([country])
+  @@index([city])
+  @@index([publishedAt])
+  @@index([expiresAt])
+  @@map("jobs")
+}
+
+model Candidate {
+  id                String          @id @default(uuid())
+  email             String          @unique
+  firstName         String
+  lastName          String
+  phone             String?
+  headline          String?
+  summary           String?
+  currentLocation   String?
+  country           String          @default("DE")
+  city              String?
+  willingToRelocate Boolean         @default(false)
+  status            CandidateStatus @default(ACTIVE)
+  resumeUrl         String?
+  resumePublicId    String?
+  resumeFileName    String?
+  resumeMimeType    String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  deletedAt         DateTime?
+
+  applications      JobApplication[]
+
+  @@index([email])
+  @@index([status])
+  @@index([country])
+  @@index([city])
+  @@map("candidates")
+}
+
+model JobApplication {
+  id             String            @id @default(uuid())
+  jobId          String
+  job            Job               @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  candidateId    String
+  candidate      Candidate         @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  currentStageId String?
+  currentStage   RecruitmentStage? @relation(fields: [currentStageId], references: [id], onDelete: SetNull)
+  status         ApplicationStatus @default(SUBMITTED)
+  coverLetter    String?
+  resumeUrl      String?
+  appliedAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@unique([jobId, candidateId])
+  @@index([jobId])
+  @@index([candidateId])
+  @@index([currentStageId])
+  @@index([status])
+  @@map("job_applications")
+}
+
+
+

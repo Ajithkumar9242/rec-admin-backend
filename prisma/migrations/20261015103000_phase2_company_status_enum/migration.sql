@@ -1,0 +1,4 @@
+-- AlterEnum
+ALTER TYPE "CompanyStatus" ADD VALUE 'IN_REVIEW';
+ALTER TYPE "CompanyStatus" ADD VALUE 'UNVERIFIED';
+ALTER TYPE "CompanyStatus" ADD VALUE 'SUSPENDED';

@@ -2,6 +2,9 @@ import { Router } from 'express';
 import authRoutes from '../modules/auth/auth.routes.js';
 import adminRoutes from '../modules/admin/admin.routes.js';
 import billingRoutes from '../modules/billing/billing.routes.js';
+import configurationRoutes from '../modules/configuration/configuration.routes.js';
+import companyRoutes from '../modules/companies/company.routes.js';
+import jobRoutes from '../modules/jobs/job.routes.js';
 
 const router = Router();
 
@@ -18,5 +21,8 @@ router.get('/health', (req, res) => {
 router.use('/auth', authRoutes);
 router.use('/admin', adminRoutes);
 router.use('/billing', billingRoutes);
+router.use('/configuration', configurationRoutes);
+router.use('/companies', companyRoutes);
+router.use('/jobs', jobRoutes);
 
 export default router;

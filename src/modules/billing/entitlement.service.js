@@ -169,13 +169,25 @@ export class EntitlementService {
     }
 
     if (resourceType === 'jobPosting') {
-      // Jobs table not yet integrated into this admin release
+      const limit = subscription.jobPostingLimit;
+      const currentUsage = await tx.job.count({
+        where: {
+          companyId,
+          status: { in: ['PUBLISHED', 'PENDING_APPROVAL'] },
+          deletedAt: null,
+        },
+      });
+
+      if (currentUsage + requestedCount > limit) {
+        throw new QuotaExceededError('jobPosting', limit, currentUsage, requestedCount);
+      }
+
       return {
         allowed: true,
         subscription,
-        limit: subscription.jobPostingLimit,
-        usage: null,
-        integrated: false,
+        limit,
+        usage: currentUsage,
+        integrated: true,
       };
     }
 
@@ -283,6 +295,14 @@ export class EntitlementService {
     try {
       const subscription = await this.resolveEffectiveSubscription(companyId, tx);
 
+      const activeJobCount = await tx.job.count({
+        where: {
+          companyId,
+          status: { in: ['PUBLISHED', 'PENDING_APPROVAL'] },
+          deletedAt: null,
+        },
+      });
+
       return {
         hasActiveSubscription: true,
         subscription: {
@@ -309,12 +329,12 @@ export class EntitlementService {
           },
           jobPostings: {
             limit: subscription.jobPostingLimit,
-            usage: null,
-            remaining: null,
+            usage: activeJobCount,
+            remaining: Math.max(0, subscription.jobPostingLimit - activeJobCount),
             unit: 'active_postings',
             resetPolicy: 'concurrent_active',
-            integrated: false,
-            statusText: 'MODULE_PENDING',
+            integrated: true,
+            statusText: 'INTEGRATED',
           },
           teamMembers: {
             limit: subscription.teamMemberLimit,

@@ -39,6 +39,38 @@ if (process.env.NODE_ENV === 'production' && (!process.env.MFA_ENCRYPTION_KEY ||
   throw new Error('MFA_ENCRYPTION_KEY must be a valid 32-byte hex string (64 characters) in production.');
 }
 
+// Helper function to validate employer application base URL
+export function validateEmployerAppUrl(url, nodeEnv = process.env.NODE_ENV) {
+  if (nodeEnv !== 'production') {
+    return (url && url.trim()) ? url.trim().replace(/\/+$/, '') : 'http://localhost:5174';
+  }
+
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    throw new Error('EMPLOYER_APP_URL is strictly required in production environment.');
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    throw new Error(`EMPLOYER_APP_URL "${url}" is not a valid URL.`);
+  }
+
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`EMPLOYER_APP_URL "${url}" must use HTTP or HTTPS protocol.`);
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  const loopbacks = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+  if (loopbacks.has(hostname) || hostname.endsWith('.localhost') || hostname.endsWith('.local')) {
+    throw new Error(
+      `EMPLOYER_APP_URL cannot point to localhost, loopback, or private origin in production ("${url}"). Please configure a valid public origin.`
+    );
+  }
+
+  return url.trim().replace(/\/+$/, '');
+}
+
 export const env = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: isTest ? parseInt(process.env.TEST_PORT || '5001', 10) : parseInt(process.env.PORT || '5000', 10),
@@ -81,4 +113,31 @@ export const env = {
   SMTP_PASS: process.env.SMTP_PASS || '',
   SMTP_FROM: process.env.SMTP_FROM || 'RecruiTrain Security <security@recruitrain.com>',
   SMTP_SECURE: process.env.SMTP_SECURE === 'true',
+  MAIL_FROM_NAME: process.env.MAIL_FROM_NAME || 'RecruiTrain Platform',
+  MAIL_FROM_ADDRESS: process.env.MAIL_FROM_ADDRESS || 'notifications@recruitrain.com',
+
+  // Cloudinary Configuration
+  CLOUDINARY_CLOUD_NAME: process.env.CLOUDINARY_CLOUD_NAME || '',
+  CLOUDINARY_API_KEY: process.env.CLOUDINARY_API_KEY || '',
+  CLOUDINARY_API_SECRET: process.env.CLOUDINARY_API_SECRET || '',
+  CLOUDINARY_FOLDER: process.env.CLOUDINARY_FOLDER || 'recruitrain',
+
+  // Employer Portal & Activation URLs
+  EMPLOYER_APP_URL: validateEmployerAppUrl(
+    process.env.EMPLOYER_APP_URL || process.env.EMPLOYER_PORTAL_URL,
+    process.env.NODE_ENV
+  ),
+  EMPLOYER_PORTAL_URL: validateEmployerAppUrl(
+    process.env.EMPLOYER_APP_URL || process.env.EMPLOYER_PORTAL_URL,
+    process.env.NODE_ENV
+  ),
+  EMPLOYER_ACTIVATION_PATH: process.env.EMPLOYER_ACTIVATION_PATH || '/activate',
+  COMPANY_INVITATION_EXPIRES_HOURS: parseInt(process.env.COMPANY_INVITATION_EXPIRES_HOURS || '48', 10),
 };
+
+export function buildEmployerActivationUrl(rawToken, options = {}) {
+  const baseUrl = options.baseUrl || env.EMPLOYER_APP_URL || env.EMPLOYER_PORTAL_URL || 'http://localhost:5174';
+  const cleanBase = baseUrl.replace(/\/+$/, '');
+  const activationPath = (options.path || env.EMPLOYER_ACTIVATION_PATH || '/activate').replace(/^\/?/, '/');
+  return `${cleanBase}${activationPath}?token=${encodeURIComponent(rawToken)}`;
+}

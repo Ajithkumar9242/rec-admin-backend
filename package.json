@@ -13,11 +13,14 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "bootstrap:admin": "node src/scripts/bootstrap-superadmin.js"
+    "bootstrap:admin": "node src/scripts/bootstrap-superadmin.js",
+    "test:smtp": "node src/scripts/test-smtp.js",
+    "security:invalidate-tokens": "node src/scripts/invalidate-compromised-tokens.js"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
     "argon2": "^0.41.1",
+    "cloudinary": "^2.11.0",
     "connect-redis": "^7.1.1",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
@@ -27,6 +30,7 @@
     "express-session": "^1.18.1",
     "helmet": "^7.2.0",
     "ioredis": "^5.4.1",
+    "multer": "^2.4.0",
     "nodemailer": "^6.9.16",
     "otplib": "^12.0.1",
     "pino": "^9.5.0",

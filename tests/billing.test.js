@@ -385,9 +385,9 @@ describe('RecruiTrain Phase 3: Billing & Subscriptions Integration Suite', () =>
       expect(snapshot.entitlements.candidateAccess.usage).toBe(0);
       expect(snapshot.entitlements.candidateAccess.integrated).toBe(true);
 
-      // Verify Jobs & Team Members reported as MODULE_PENDING (not integrated)
-      expect(snapshot.entitlements.jobPostings.integrated).toBe(false);
-      expect(snapshot.entitlements.jobPostings.statusText).toBe('MODULE_PENDING');
+      // Verify Jobs is INTEGRATED in Phase 4 and Team Members remains MODULE_PENDING
+      expect(snapshot.entitlements.jobPostings.integrated).toBe(true);
+      expect(snapshot.entitlements.jobPostings.statusText).toBe('INTEGRATED');
       expect(snapshot.entitlements.teamMembers.integrated).toBe(false);
       expect(snapshot.entitlements.teamMembers.statusText).toBe('MODULE_PENDING');
     });

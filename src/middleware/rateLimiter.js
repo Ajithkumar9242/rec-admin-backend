@@ -45,3 +45,14 @@ export const generalApiLimiter = rateLimit({
     error: 'Rate limit exceeded. Please slow down.',
   },
 });
+
+export const invitationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: env.NODE_ENV === 'test' ? 1000 : 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Too many invitation verification attempts from this IP. Please wait 15 minutes.',
+  },
+});
