@@ -16,6 +16,8 @@ import {
   applyJobSchema,
   getJobApplicantsSchema,
   updateJobStatusSchema,
+  deleteJobSchema,
+  restoreJobSchema,
 } from './job.validation.js';
 
 const upload = multer({
@@ -127,11 +129,18 @@ router.patch(
   JobController.updateJobStatus
 );
 
-// Delete job (archive)
+// Delete job (move to trash or permanently delete)
 router.delete(
   '/:id',
-  validate(getJobByIdSchema),
+  validate(deleteJobSchema),
   JobController.deleteJob
+);
+
+// Restore job from trash
+router.post(
+  '/:id/restore',
+  validate(restoreJobSchema),
+  JobController.restoreJob
 );
 
 export default router;

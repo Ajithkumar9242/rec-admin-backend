@@ -30,11 +30,13 @@ export class JobService {
     companyId,
     sortBy = 'createdAt',
     sortOrder = 'desc',
+    trashed = false,
   }) {
     const skip = (page - 1) * limit;
+    const isTrashed = trashed === true || trashed === 'true';
 
     const where = {
-      deletedAt: null,
+      deletedAt: isTrashed ? { not: null } : null,
       ...(status ? { status } : {}),
       ...(hiringScope ? { hiringScope } : {}),
       ...(employmentType ? { employmentType } : {}),
@@ -63,11 +65,13 @@ export class JobService {
       orderBy.status = sortOrder;
     } else if (sortBy === 'openings') {
       orderBy.openings = sortOrder;
+    } else if (sortBy === 'deletedAt' || (isTrashed && sortBy === 'createdAt')) {
+      orderBy.deletedAt = sortOrder;
     } else {
       orderBy.createdAt = sortOrder;
     }
 
-    const [total, items, statusCounts] = await Promise.all([
+    const [total, items, statusCounts, trashedCount] = await Promise.all([
       prisma.job.count({ where }),
       prisma.job.findMany({
         where,
@@ -105,6 +109,9 @@ export class JobService {
         where: { deletedAt: null },
         _count: { _all: true },
       }),
+      prisma.job.count({
+        where: { deletedAt: { not: null } },
+      }),
     ]);
 
     const counts = {
@@ -114,6 +121,7 @@ export class JobService {
       PUBLISHED: 0,
       CLOSED: 0,
       ARCHIVED: 0,
+      TRASH: trashedCount,
     };
     for (const group of statusCounts) {
       if (counts[group.status] !== undefined) {
@@ -311,7 +319,7 @@ export class JobService {
       },
     });
 
-    if (!job || job.deletedAt !== null) {
+    if (!job) {
       throw createHttpError('Job posting not found.', 404);
     }
 
@@ -608,15 +616,52 @@ export class JobService {
   }
 
   /**
-   * Soft delete a job posting
+   * Delete job posting (MOVE_TO_TRASH or DELETE_PERMANENTLY)
    */
-  static async deleteJob(id) {
-    const job = await prisma.job.findUnique({ where: { id } });
-    if (!job || job.deletedAt !== null) {
+  static async deleteJob(id, mode = 'MOVE_TO_TRASH', actorContext = {}) {
+    const existingJob = await prisma.job.findUnique({
+      where: { id },
+      include: {
+        _count: {
+          select: { applications: true },
+        },
+      },
+    });
+
+    if (!existingJob) {
       throw createHttpError('Job posting not found.', 404);
     }
 
-    await prisma.job.update({
+    if (mode === 'DELETE_PERMANENTLY') {
+      if (actorContext?.role !== 'SUPER_ADMIN') {
+        throw createHttpError('Only Super Administrators are authorized to permanently delete job postings.', 403);
+      }
+
+      if (existingJob._count.applications > 0) {
+        throw createHttpError(
+          `Cannot permanently delete job "${existingJob.title}" because it contains ${existingJob._count.applications} active candidate application(s). Soft delete (Move to Trash) to preserve candidate submission history.`,
+          400
+        );
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT 1 FROM jobs WHERE id = ${id} FOR UPDATE`;
+        await tx.job.delete({ where: { id } });
+      });
+
+      return {
+        success: true,
+        message: `Job posting "${existingJob.title}" was permanently deleted.`,
+        data: { id, mode: 'DELETE_PERMANENTLY' },
+      };
+    }
+
+    // Default: Soft delete (MOVE_TO_TRASH)
+    if (existingJob.deletedAt !== null) {
+      throw createHttpError(`Job posting "${existingJob.title}" is already in trash.`, 400);
+    }
+
+    const updated = await prisma.job.update({
       where: { id },
       data: {
         deletedAt: new Date(),
@@ -624,7 +669,82 @@ export class JobService {
       },
     });
 
-    return { success: true, message: 'Job posting deleted successfully.' };
+    return {
+      success: true,
+      message: `Job posting "${existingJob.title}" moved to Trash.`,
+      data: { ...updated, mode: 'MOVE_TO_TRASH' },
+    };
+  }
+
+  /**
+   * Restore a job posting from Trash
+   */
+  static async restoreJob(id, actorContext = {}) {
+    return await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT 1 FROM jobs WHERE id = ${id} FOR UPDATE`;
+      const existingJob = await tx.job.findUnique({
+        where: { id },
+        include: {
+          company: {
+            select: {
+              id: true,
+              name: true,
+              status: true,
+              deletedAt: true,
+            },
+          },
+        },
+      });
+
+      if (!existingJob) {
+        throw createHttpError('Job posting not found.', 404);
+      }
+
+      if (existingJob.deletedAt === null) {
+        throw createHttpError(`Job posting "${existingJob.title}" is not in trash.`, 400);
+      }
+
+      const deletedTime = new Date(existingJob.deletedAt).getTime();
+      const daysSinceDeleted = (Date.now() - deletedTime) / (1000 * 3600 * 24);
+      if (daysSinceDeleted > 30 && actorContext?.role !== 'SUPER_ADMIN') {
+        throw createHttpError(
+          `Cannot restore job "${existingJob.title}" because the 30-day retention period has expired. Only Super Administrators can override.`,
+          403
+        );
+      }
+
+      if (!existingJob.company) {
+        throw createHttpError('Cannot restore job because its parent company no longer exists.', 400);
+      }
+      if (existingJob.company.deletedAt !== null) {
+        throw createHttpError(
+          `Cannot restore job "${existingJob.title}" because parent company "${existingJob.company.name}" is currently in trash. Restore the company first.`,
+          400
+        );
+      }
+
+      const updated = await tx.job.update({
+        where: { id },
+        data: {
+          deletedAt: null,
+          status: 'DRAFT',
+        },
+        include: {
+          company: {
+            select: { id: true, name: true, companyCode: true, status: true },
+          },
+          industry: {
+            select: { id: true, name: true, code: true },
+          },
+        },
+      });
+
+      return {
+        success: true,
+        message: `Job posting "${existingJob.title}" was successfully restored from Trash.`,
+        data: updated,
+      };
+    });
   }
 
   /**

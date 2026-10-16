@@ -99,7 +99,27 @@ export class JobController {
 
   static async deleteJob(req, res, next) {
     try {
-      const result = await JobService.deleteJob(req.params.id);
+      const mode = req.query.mode || 'MOVE_TO_TRASH';
+      const actorContext = {
+        adminId: req.admin?.id,
+        role: req.admin?.role,
+        email: req.admin?.email,
+      };
+      const result = await JobService.deleteJob(req.params.id, mode, actorContext);
+      return res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async restoreJob(req, res, next) {
+    try {
+      const actorContext = {
+        adminId: req.admin?.id,
+        role: req.admin?.role,
+        email: req.admin?.email,
+      };
+      const result = await JobService.restoreJob(req.params.id, actorContext);
       return res.status(200).json(result);
     } catch (error) {
       next(error);

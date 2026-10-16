@@ -168,8 +168,24 @@ export const listAdminJobsSchema = {
     employmentType: jobEmploymentTypeEnum.optional(),
     workArrangement: jobWorkArrangementEnum.optional(),
     companyId: z.string().uuid().optional(),
-    sortBy: z.enum(['createdAt', 'title', 'publishedAt', 'status', 'openings']).default('createdAt'),
+    sortBy: z.enum(['createdAt', 'title', 'publishedAt', 'status', 'openings', 'deletedAt']).default('createdAt'),
     sortOrder: z.enum(['asc', 'desc']).default('desc'),
+    trashed: z.preprocess((val) => val === true || val === 'true', z.boolean()).optional().default(false),
+  }),
+};
+
+export const deleteJobSchema = {
+  params: z.object({
+    id: z.string().uuid('Invalid job ID format'),
+  }),
+  query: z.object({
+    mode: z.enum(['MOVE_TO_TRASH', 'DELETE_PERMANENTLY']).optional().default('MOVE_TO_TRASH'),
+  }),
+};
+
+export const restoreJobSchema = {
+  params: z.object({
+    id: z.string().uuid('Invalid job ID format'),
   }),
 };
 

@@ -793,4 +793,225 @@ describe('Phase 4: Company-to-Hiring Integration & Candidate Discovery Suite', (
       expect(applicantsRes.body.items[0].candidate.email).toBe('first.applicant@test.com');
     });
   });
+
+  describe('5. Job Trash Lifecycle, Soft Deletion, Restore, and Permanent Deletion Dependency Guard', () => {
+    let trashTestCompany;
+    let jobWithApp;
+    let jobWithoutApp;
+    let standardAdminCookie;
+    let standardAdminId;
+
+    beforeAll(async () => {
+      // 1. Create company
+      trashTestCompany = await prisma.company.create({
+        data: {
+          name: 'Trash Cycle Testing GmbH',
+          companyCode: 'TRASH-TEST',
+          status: 'ACTIVE',
+          hiringDomestic: true,
+        },
+      });
+      createdCompanyIds.push(trashTestCompany.id);
+
+      // 2. Create job with application
+      jobWithApp = await prisma.job.create({
+        data: {
+          companyId: trashTestCompany.id,
+          title: 'Job With Applicant Dependency',
+          description: 'This job will have an applicant and cannot be permanently deleted.',
+          status: 'PUBLISHED',
+          publishedAt: new Date(),
+        },
+      });
+      createdJobIds.push(jobWithApp.id);
+
+      const candidate = await prisma.candidate.create({
+        data: {
+          email: 'trash.guard.candidate@test.com',
+          firstName: 'Guard',
+          lastName: 'Candidate',
+        },
+      });
+      createdCandidateIds.push(candidate.id);
+
+      await prisma.jobApplication.create({
+        data: {
+          jobId: jobWithApp.id,
+          candidateId: candidate.id,
+          status: 'SUBMITTED',
+        },
+      });
+
+      // 3. Create job without application
+      jobWithoutApp = await prisma.job.create({
+        data: {
+          companyId: trashTestCompany.id,
+          title: 'Job Without Applicants For Perm Delete',
+          description: 'This job has no applicants and can be permanently deleted.',
+          status: 'DRAFT',
+        },
+      });
+      createdJobIds.push(jobWithoutApp.id);
+
+      // 4. Create standard ADMIN (non-super-admin) to verify 403 authorization guard
+      const stdPassHash = await hashPassword('StandardPassword123!@#');
+      const stdTotpGen = generateTotpSecret('std_job_admin@recruitrain.test');
+      const stdAdmin = await prisma.admin.create({
+        data: {
+          email: 'std_job_admin@recruitrain.test',
+          name: 'Standard Job Admin',
+          passwordHash: stdPassHash,
+          role: 'ADMIN',
+          status: 'ACTIVE',
+          totpEnabled: true,
+          totpSecret: encryptTotpSecret(stdTotpGen.secret),
+        },
+      });
+      standardAdminId = stdAdmin.id;
+
+      const stdLoginRes = await request(app)
+        .post('/api/auth/login')
+        .set('x-test-bypass-csrf', 'true')
+        .send({ email: 'std_job_admin@recruitrain.test', password: 'StandardPassword123!@#' });
+
+      const stdCode = authenticator.generate(stdTotpGen.secret);
+      const stdVerifyRes = await request(app)
+        .post('/api/auth/verify-2fa')
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', stdLoginRes.headers['set-cookie'])
+        .send({ adminId: stdAdmin.id, code: stdCode });
+
+      standardAdminCookie = stdVerifyRes.headers['set-cookie'];
+    });
+
+    afterAll(async () => {
+      if (standardAdminId) {
+        await prisma.admin.deleteMany({ where: { id: standardAdminId } });
+      }
+    });
+
+    it('soft deletes a job posting (moves to Trash) and updates status to ARCHIVED', async () => {
+      const res = await request(app)
+        .delete(`/api/jobs/${jobWithoutApp.id}`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.mode).toBe('MOVE_TO_TRASH');
+
+      const checked = await prisma.job.findUnique({ where: { id: jobWithoutApp.id } });
+      expect(checked.deletedAt).not.toBeNull();
+      expect(checked.status).toBe('ARCHIVED');
+    });
+
+    it('rejects soft deleting a job that is already in trash', async () => {
+      const res = await request(app)
+        .delete(`/api/jobs/${jobWithoutApp.id}`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/already in trash/i);
+    });
+
+    it('filters out trashed jobs from active directory and counts TRASH correctly', async () => {
+      // Active jobs view
+      const activeRes = await request(app)
+        .get('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(activeRes.status).toBe(200);
+      expect(activeRes.body.counts.TRASH).toBeGreaterThanOrEqual(1);
+      const foundInActive = activeRes.body.items.find((j) => j.id === jobWithoutApp.id);
+      expect(foundInActive).toBeUndefined();
+
+      // Dedicated Trash view
+      const trashRes = await request(app)
+        .get('/api/jobs?trashed=true')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(trashRes.status).toBe(200);
+      const foundInTrash = trashRes.body.items.find((j) => j.id === jobWithoutApp.id);
+      expect(foundInTrash).toBeDefined();
+      expect(foundInTrash.title).toBe('Job Without Applicants For Perm Delete');
+    });
+
+    it('allows Admin to view details of a trashed job', async () => {
+      const res = await request(app)
+        .get(`/api/jobs/${jobWithoutApp.id}`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.id).toBe(jobWithoutApp.id);
+      expect(res.body.data.deletedAt).not.toBeNull();
+    });
+
+    it('restores a trashed job into safe DRAFT state and clears deletedAt', async () => {
+      const res = await request(app)
+        .post(`/api/jobs/${jobWithoutApp.id}/restore`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.deletedAt).toBeNull();
+      expect(res.body.data.status).toBe('DRAFT');
+
+      const checked = await prisma.job.findUnique({ where: { id: jobWithoutApp.id } });
+      expect(checked.deletedAt).toBeNull();
+      expect(checked.status).toBe('DRAFT');
+    });
+
+    it('rejects restoring a job that is not in trash', async () => {
+      const res = await request(app)
+        .post(`/api/jobs/${jobWithoutApp.id}/restore`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/is not in trash/i);
+    });
+
+    it('blocks permanent deletion if caller is not SUPER_ADMIN (403)', async () => {
+      const res = await request(app)
+        .delete(`/api/jobs/${jobWithoutApp.id}?mode=DELETE_PERMANENTLY`)
+        .set('Cookie', standardAdminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/Super Administrators/i);
+    });
+
+    it('blocks permanent deletion if job contains candidate applications (dependency guard 400)', async () => {
+      const res = await request(app)
+        .delete(`/api/jobs/${jobWithApp.id}?mode=DELETE_PERMANENTLY`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/active candidate application/i);
+
+      // Verify job and applications still exist
+      const stillExists = await prisma.job.findUnique({ where: { id: jobWithApp.id } });
+      expect(stillExists).not.toBeNull();
+    });
+
+    it('successfully permanently deletes a job when authorized and no candidate dependencies exist', async () => {
+      const res = await request(app)
+        .delete(`/api/jobs/${jobWithoutApp.id}?mode=DELETE_PERMANENTLY`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.mode).toBe('DELETE_PERMANENTLY');
+
+      const deleted = await prisma.job.findUnique({ where: { id: jobWithoutApp.id } });
+      expect(deleted).toBeNull();
+    });
+  });
 });
