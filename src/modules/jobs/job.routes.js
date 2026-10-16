@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { JobController } from './job.controller.js';
 import {
   authenticateSession,
@@ -9,17 +10,25 @@ import {
   createJobSchema,
   updateJobSchema,
   getJobByIdSchema,
+  listAdminJobsSchema,
   listCompanyJobsSchema,
   listPublicJobsSchema,
   applyJobSchema,
+  getJobApplicantsSchema,
+  updateJobStatusSchema,
 } from './job.validation.js';
-
-import multer from 'multer';
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB max resume buffer
+    fileSize: 10 * 1024 * 1024, // 10MB max buffer
+  },
+});
+
+const txtUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 1 * 1024 * 1024, // 1MB max for .txt files
   },
 });
 
@@ -62,30 +71,63 @@ router.post(
 router.use(authenticateSession);
 router.use(require2FAVerified);
 
+// Admin Job Directory
+router.get(
+  '/',
+  validate(listAdminJobsSchema),
+  JobController.listAdminJobs
+);
+
+// Create Job
 router.post(
   '/',
   validate(createJobSchema),
   JobController.createJob
 );
 
+// Upload .txt file to parse description
+router.post(
+  '/parse-description-file',
+  txtUpload.single('file'),
+  JobController.parseDescriptionFile
+);
+
+// List company jobs
 router.get(
   '/company/:companyId',
   validate(listCompanyJobsSchema),
   JobController.listCompanyJobs
 );
 
+// Single job details
 router.get(
   '/:id',
   validate(getJobByIdSchema),
   JobController.getJobById
 );
 
+// Job applicants
+router.get(
+  '/:id/applicants',
+  validate(getJobApplicantsSchema),
+  JobController.getJobApplicants
+);
+
+// Update job
 router.put(
   '/:id',
   validate(updateJobSchema),
   JobController.updateJob
 );
 
+// Update job status (suspend, inactive, resume, etc.)
+router.patch(
+  '/:id/status',
+  validate(updateJobStatusSchema),
+  JobController.updateJobStatus
+);
+
+// Delete job (archive)
 router.delete(
   '/:id',
   validate(getJobByIdSchema),

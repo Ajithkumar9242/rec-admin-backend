@@ -501,4 +501,240 @@ describe('PDF Document Integrity, Compliance Uploads & Company Error Handling Su
       expect(checkInDb.status).toBe('INACTIVE');
     });
   });
+
+  describe('Trash & Retention Company Document Access Regression Suite (Section F)', () => {
+    it('accurately reports "Company has been moved to trash" (404) for trashed company document download & file streaming', async () => {
+      const trashedCompany = await prisma.company.create({
+        data: {
+          name: 'Trashed Docs Verification GmbH',
+          companyCode: 'TRSH' + Math.floor(Math.random() * 899 + 100),
+          country: 'DE',
+          status: 'INACTIVE',
+          deletedAt: new Date(),
+          documents: {
+            create: {
+              name: 'Trashed_Compliance_Proof.pdf',
+              fileUrl: 'https://cdn.example.com/trashed_compliance_proof.pdf',
+              isPrivate: true,
+            },
+          },
+        },
+        include: { documents: true },
+      });
+      createdCompanyIds.push(trashedCompany.id);
+
+      // Verify /download returns 404 with accurate trashed error
+      const downloadRes = await request(app)
+        .get(`/api/companies/${trashedCompany.id}/documents/${trashedCompany.documents[0].id}/download`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(downloadRes.status).toBe(404);
+      expect(downloadRes.body.error).toBe('Company has been moved to trash');
+
+      // Verify /file streaming returns 404 with accurate trashed error
+      const fileRes = await request(app)
+        .get(`/api/companies/${trashedCompany.id}/documents/${trashedCompany.documents[0].id}/file`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(fileRes.status).toBe(404);
+      expect(fileRes.body.error).toBe('Company has been moved to trash');
+    });
+
+    it('restoring the company correctly restores document download and preview/streaming without document re-upload', async () => {
+      const companyToRestore = await prisma.company.create({
+        data: {
+          name: 'Restorable Docs Corporation',
+          companyCode: 'RSTR' + Math.floor(Math.random() * 899 + 100),
+          country: 'DE',
+          status: 'INACTIVE',
+          deletedAt: new Date(Date.now() - 2 * 24 * 3600 * 1000), // 2 days in trash
+          documents: {
+            create: {
+              name: 'Registration_Certificate.pdf',
+              fileUrl: 'https://cdn.example.com/registration_cert.pdf',
+              isPrivate: true,
+            },
+          },
+        },
+        include: { documents: true },
+      });
+      createdCompanyIds.push(companyToRestore.id);
+      const docId = companyToRestore.documents[0].id;
+
+      // Prior to restore: access blocked
+      const preRestoreRes = await request(app)
+        .get(`/api/companies/${companyToRestore.id}/documents/${docId}/download`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+      expect(preRestoreRes.status).toBe(404);
+      expect(preRestoreRes.body.error).toBe('Company has been moved to trash');
+
+      // Execute restoration
+      const restoreRes = await request(app)
+        .post(`/api/companies/${companyToRestore.id}/restore`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.success).toBe(true);
+      expect(restoreRes.body.data.deletedAt).toBeNull();
+      expect(restoreRes.body.data.status).toBe('IN_REVIEW');
+
+      // After restore: download URL generation succeeds
+      const postRestoreDownload = await request(app)
+        .get(`/api/companies/${companyToRestore.id}/documents/${docId}/download`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(postRestoreDownload.status).toBe(200);
+      expect(postRestoreDownload.body.success).toBe(true);
+      expect(postRestoreDownload.body.data.downloadUrl).toContain(
+        `/api/companies/${companyToRestore.id}/documents/${docId}/file?disposition=attachment`
+      );
+      expect(postRestoreDownload.body.data.previewUrl).toContain(
+        `/api/companies/${companyToRestore.id}/documents/${docId}/file?disposition=inline`
+      );
+
+      // After restore: streaming succeeds with mock storage fetch without re-upload
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () => ({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/pdf' }),
+        arrayBuffer: async () =>
+          testPdfBuffer.buffer.slice(testPdfBuffer.byteOffset, testPdfBuffer.byteOffset + testPdfBuffer.byteLength),
+      });
+
+      try {
+        const postRestoreStream = await request(app)
+          .get(`/api/companies/${companyToRestore.id}/documents/${docId}/file`)
+          .set('x-test-bypass-csrf', 'true')
+          .set('Cookie', adminCookie);
+
+        expect(postRestoreStream.status).toBe(200);
+        expect(postRestoreStream.headers['content-type']).toContain('application/pdf');
+        expect(postRestoreStream.headers['content-disposition']).toContain('inline');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('returns "Company not found" (404) for a genuinely missing company ID', async () => {
+      const nonExistentCompanyId = crypto.randomUUID();
+      const fakeDocId = crypto.randomUUID();
+
+      const downloadRes = await request(app)
+        .get(`/api/companies/${nonExistentCompanyId}/documents/${fakeDocId}/download`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(downloadRes.status).toBe(404);
+      expect(downloadRes.body.error).toBe('Company not found');
+
+      const fileRes = await request(app)
+        .get(`/api/companies/${nonExistentCompanyId}/documents/${fakeDocId}/file`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(fileRes.status).toBe(404);
+      expect(fileRes.body.error).toBe('Company not found');
+    });
+
+    it('returns "Document not found for this company" (404) when document belongs to a different company', async () => {
+      // Company A with Document A
+      const companyA = await prisma.company.create({
+        data: {
+          name: 'Company Alpha',
+          companyCode: 'ALPH' + Math.floor(Math.random() * 899 + 100),
+          country: 'DE',
+          status: 'ACTIVE',
+          documents: {
+            create: {
+              name: 'Alpha_Contract.pdf',
+              fileUrl: 'https://cdn.example.com/alpha_contract.pdf',
+              isPrivate: true,
+            },
+          },
+        },
+        include: { documents: true },
+      });
+      createdCompanyIds.push(companyA.id);
+
+      // Company B without that document
+      const companyB = await prisma.company.create({
+        data: {
+          name: 'Company Beta',
+          companyCode: 'BETA' + Math.floor(Math.random() * 899 + 100),
+          country: 'DE',
+          status: 'ACTIVE',
+        },
+      });
+      createdCompanyIds.push(companyB.id);
+
+      const docAId = companyA.documents[0].id;
+
+      // Accessing Company A's document via Company B's route
+      const crossCompanyDownload = await request(app)
+        .get(`/api/companies/${companyB.id}/documents/${docAId}/download`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(crossCompanyDownload.status).toBe(404);
+      expect(crossCompanyDownload.body.error).toBe('Document not found for this company');
+
+      const crossCompanyFile = await request(app)
+        .get(`/api/companies/${companyB.id}/documents/${docAId}/file`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(crossCompanyFile.status).toBe(404);
+      expect(crossCompanyFile.body.error).toBe('Document not found for this company');
+    });
+
+    it('enforces unauthorized access and inactive-company restrictions for document downloads', async () => {
+      const inactiveCompany = await prisma.company.create({
+        data: {
+          name: 'Inactive Restrict Corp',
+          companyCode: 'RSTR' + Math.floor(Math.random() * 899 + 100),
+          country: 'DE',
+          status: 'INACTIVE',
+          documents: {
+            create: {
+              name: 'Inactive_Doc.pdf',
+              fileUrl: 'https://cdn.example.com/inactive_restricted.pdf',
+              isPrivate: true,
+            },
+          },
+        },
+        include: { documents: true },
+      });
+      createdCompanyIds.push(inactiveCompany.id);
+      const docId = inactiveCompany.documents[0].id;
+
+      // 1. Unauthenticated request -> 401
+      const unauthDownload = await request(app)
+        .get(`/api/companies/${inactiveCompany.id}/documents/${docId}/download`);
+      expect(unauthDownload.status).toBe(401);
+
+      // 2. Regular ADMIN on inactive company -> 403 Forbidden
+      const regAdminDownload = await request(app)
+        .get(`/api/companies/${inactiveCompany.id}/documents/${docId}/download`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', regularAdminCookie);
+
+      expect(regAdminDownload.status).toBe(403);
+      expect(regAdminDownload.body.error).toContain('Access denied: Company is inactive and document access is restricted');
+
+      // 3. SUPER_ADMIN on inactive company -> permitted
+      const superAdminDownload = await request(app)
+        .get(`/api/companies/${inactiveCompany.id}/documents/${docId}/download`)
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(superAdminDownload.status).toBe(200);
+      expect(superAdminDownload.body.success).toBe(true);
+    });
+  });
 });

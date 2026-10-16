@@ -588,4 +588,209 @@ describe('Phase 4: Company-to-Hiring Integration & Candidate Discovery Suite', (
       if (res2.status === 201) createdJobIds.push(res2.body.data.id);
     });
   });
+
+  describe('Phase B: Admin Jobs Directory, Moderation & Applicant Limits Suite', () => {
+    let testCompany;
+
+    beforeAll(async () => {
+      testCompany = await prisma.company.create({
+        data: {
+          name: 'Phase B Enterprise GmbH',
+          companyCode: 'COMP-PHASE-B',
+          email: 'phaseb@enterprise.test',
+          country: 'DE',
+          status: 'ACTIVE',
+          hiringDomestic: true,
+          hiringEu: true,
+          hiringInternational: false,
+        },
+      });
+      createdCompanyIds.push(testCompany.id);
+    });
+
+    it('lists admin jobs with search, status filters, hiring scope filters, and status counts', async () => {
+      const job1 = await prisma.job.create({
+        data: {
+          companyId: testCompany.id,
+          title: 'Full Stack Engineer (Elixir/React)',
+          jobCode: 'JOB-ELIXIR-01',
+          department: 'Engineering',
+          description: 'Build high-performance real-time applications.',
+          hiringScope: 'DOMESTIC',
+          status: 'DRAFT',
+          openings: 2,
+        },
+      });
+      createdJobIds.push(job1.id);
+
+      const job2 = await prisma.job.create({
+        data: {
+          companyId: testCompany.id,
+          title: 'Product Design Lead',
+          jobCode: 'JOB-DESIGN-01',
+          department: 'Design',
+          description: 'Lead enterprise product experience design.',
+          hiringScope: 'EU',
+          status: 'CLOSED',
+          openings: 1,
+        },
+      });
+      createdJobIds.push(job2.id);
+
+      // 1. Query all admin jobs
+      const resAll = await request(app)
+        .get('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(resAll.status).toBe(200);
+      expect(resAll.body.success).toBe(true);
+      expect(resAll.body.items.length).toBeGreaterThanOrEqual(2);
+      expect(resAll.body.counts).toHaveProperty('ALL');
+      expect(resAll.body.counts).toHaveProperty('DRAFT');
+
+      // 2. Search by title
+      const resSearch = await request(app)
+        .get('/api/jobs')
+        .query({ search: 'Elixir' })
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(resSearch.status).toBe(200);
+      expect(resSearch.body.items.some((j) => j.id === job1.id)).toBe(true);
+      expect(resSearch.body.items.some((j) => j.id === job2.id)).toBe(false);
+
+      // 3. Filter by status
+      const resStatus = await request(app)
+        .get('/api/jobs')
+        .query({ status: 'CLOSED' })
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(resStatus.status).toBe(200);
+      expect(resStatus.body.items.some((j) => j.id === job2.id)).toBe(true);
+      expect(resStatus.body.items.some((j) => j.id === job1.id)).toBe(false);
+    });
+
+    it('parses plain-text (.txt) file upload and rejects other file formats or binaries', async () => {
+      // 1. Valid .txt upload
+      const validText = 'We are seeking an outstanding software engineer with 5+ years of experience.';
+      const resTxt = await request(app)
+        .post('/api/jobs/parse-description-file')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .attach('file', Buffer.from(validText, 'utf-8'), 'job-description.txt');
+
+      expect(resTxt.status).toBe(200);
+      expect(resTxt.body.success).toBe(true);
+      expect(resTxt.body.text).toBe(validText);
+
+      // 2. Reject .pdf file extension
+      const resPdf = await request(app)
+        .post('/api/jobs/parse-description-file')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .attach('file', Buffer.from('%PDF-1.4 binary content', 'utf-8'), 'resume.pdf');
+
+      expect(resPdf.status).toBe(400);
+      expect(resPdf.body.error).toMatch(/Only plain-text \(\.txt\) files are accepted/i);
+
+      // 3. Reject binary content pretending to be txt
+      const binaryFakeTxt = Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff]);
+      const resBin = await request(app)
+        .post('/api/jobs/parse-description-file')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .attach('file', binaryFakeTxt, 'malicious.txt');
+
+      expect(resBin.status).toBe(400);
+      expect(resBin.body.error).toMatch(/Binary content detected/i);
+    });
+
+    it('moderates job status transitions (CLOSED, DRAFT, ARCHIVED)', async () => {
+      const job = await prisma.job.create({
+        data: {
+          companyId: testCompany.id,
+          title: 'Moderation Test Job',
+          description: 'Testing administrative status transitions.',
+          status: 'DRAFT',
+        },
+      });
+      createdJobIds.push(job.id);
+
+      // Suspend / Close job
+      const resClose = await request(app)
+        .patch(`/api/jobs/${job.id}/status`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ status: 'CLOSED', reason: 'Temporarily suspended by compliance' });
+
+      expect(resClose.status).toBe(200);
+      expect(resClose.body.data.status).toBe('CLOSED');
+      expect(resClose.body.data.rejectionReason).toBe('Temporarily suspended by compliance');
+
+      // Reactivate to DRAFT
+      const resDraft = await request(app)
+        .patch(`/api/jobs/${job.id}/status`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ status: 'DRAFT' });
+
+      expect(resDraft.status).toBe(200);
+      expect(resDraft.body.data.status).toBe('DRAFT');
+    });
+
+    it('enforces applicant limit and auto-close when maximum applicants reached', async () => {
+      const limitedJob = await prisma.job.create({
+        data: {
+          companyId: testCompany.id,
+          title: 'Limited Intake Internship',
+          description: 'Position strictly limited to 1 applicant.',
+          status: 'PUBLISHED',
+          maxApplicantsLimit: 1,
+          autoCloseOnLimit: true,
+          publishedAt: new Date(),
+        },
+      });
+      createdJobIds.push(limitedJob.id);
+
+      // First applicant succeeds
+      const appRes1 = await request(app)
+        .post(`/api/jobs/public/${limitedJob.id}/apply`)
+        .send({
+          firstName: 'First',
+          lastName: 'Applicant',
+          email: 'first.applicant@test.com',
+        });
+
+      expect(appRes1.status).toBe(201);
+      expect(appRes1.body.success).toBe(true);
+
+      // Verify second applicant is blocked due to limit
+      const appRes2 = await request(app)
+        .post(`/api/jobs/public/${limitedJob.id}/apply`)
+        .send({
+          firstName: 'Second',
+          lastName: 'Applicant',
+          email: 'second.applicant@test.com',
+        });
+
+      expect(appRes2.status).toBe(400);
+      expect(appRes2.body.error).toMatch(/maximum application limit/i);
+
+      // Verify job was automatically closed
+      const updatedJob = await prisma.job.findUnique({ where: { id: limitedJob.id } });
+      expect(updatedJob.status).toBe('CLOSED');
+
+      // Admin gets applicants for the job
+      const applicantsRes = await request(app)
+        .get(`/api/jobs/${limitedJob.id}/applicants`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(applicantsRes.status).toBe(200);
+      expect(applicantsRes.body.items.length).toBe(1);
+      expect(applicantsRes.body.items[0].candidate.email).toBe('first.applicant@test.com');
+    });
+  });
 });

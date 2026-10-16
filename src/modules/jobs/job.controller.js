@@ -1,6 +1,21 @@
 import { JobService } from './job.service.js';
 
 export class JobController {
+  /**
+   * GET /api/jobs (Admin directory)
+   */
+  static async listAdminJobs(req, res, next) {
+    try {
+      const result = await JobService.listAdminJobs(req.query);
+      return res.status(200).json({
+        success: true,
+        ...result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async createJob(req, res, next) {
     try {
       const actorContext = {
@@ -29,6 +44,18 @@ export class JobController {
     }
   }
 
+  static async getJobApplicants(req, res, next) {
+    try {
+      const result = await JobService.getJobApplicants(req.params.id, req.query);
+      return res.status(200).json({
+        success: true,
+        ...result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   static async updateJob(req, res, next) {
     try {
       const actorContext = {
@@ -40,6 +67,31 @@ export class JobController {
         success: true,
         data: job,
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async updateJobStatus(req, res, next) {
+    try {
+      const actorContext = {
+        adminId: req.admin?.id,
+        role: req.admin?.role,
+      };
+      const job = await JobService.updateJobStatus(req.params.id, req.body, actorContext);
+      return res.status(200).json({
+        success: true,
+        data: job,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async parseDescriptionFile(req, res, next) {
+    try {
+      const result = JobService.parseDescriptionFile(req.file);
+      return res.status(200).json(result);
     } catch (error) {
       next(error);
     }

@@ -448,8 +448,14 @@ export class CompanyService {
    */
   static async updateCompany(id, data, actorAdmin = null) {
     const existing = await prisma.company.findUnique({ where: { id } });
-    if (!existing || existing.deletedAt !== null) {
-      const error = new Error('Company not found or already in trash');
+    if (!existing) {
+      const error = new Error('Company not found');
+      error.status = 404;
+      throw error;
+    }
+
+    if (existing.deletedAt !== null) {
+      const error = new Error('Company has been moved to trash');
       error.status = 404;
       throw error;
     }
@@ -496,6 +502,12 @@ export class CompanyService {
    * Delete company (Soft delete to Trash with 30-day retention or permanent delete if eligible)
    */
   static async deleteCompany(id, mode = 'MOVE_TO_TRASH', actorAdmin = null) {
+    if (!id) {
+      const error = new Error('Company ID is required');
+      error.status = 400;
+      throw error;
+    }
+
     const existing = await prisma.company.findUnique({
       where: { id },
       include: {
@@ -506,18 +518,27 @@ export class CompanyService {
             documents: true,
             users: true,
             candidateAccessLogs: true,
+            jobs: true,
           },
         },
       },
     });
 
-    if (!existing || existing.deletedAt !== null) {
-      const error = new Error(`Company with ID "${id}" was not found or already deleted.`);
+    if (!existing) {
+      const error = new Error(`Company with ID "${id}" was not found.`);
       error.status = 404;
       throw error;
     }
 
     if (mode === 'DELETE_PERMANENTLY') {
+      // 1. Enforce Super Admin authorization on the server
+      if (actorAdmin && actorAdmin.role !== 'SUPER_ADMIN') {
+        const error = new Error('Only Super Administrators are authorized to permanently delete companies.');
+        error.status = 403;
+        throw error;
+      }
+
+      // 2. Data integrity & dependency check: never cascade delete active business records
       const counts = existing._count;
       const blockingReasons = [];
       if (counts.subscriptions > 0) blockingReasons.push(`${counts.subscriptions} subscription(s)`);
@@ -525,6 +546,7 @@ export class CompanyService {
       if (counts.documents > 0) blockingReasons.push(`${counts.documents} compliance document(s)`);
       if (counts.users > 0) blockingReasons.push(`${counts.users} user account(s)`);
       if (counts.candidateAccessLogs > 0) blockingReasons.push(`${counts.candidateAccessLogs} candidate access log(s)`);
+      if (counts.jobs > 0) blockingReasons.push(`${counts.jobs} job posting(s)`);
 
       if (blockingReasons.length > 0) {
         const error = new Error(
@@ -534,7 +556,20 @@ export class CompanyService {
         throw error;
       }
 
-      await prisma.company.delete({ where: { id } });
+      // 3. Transaction-safe atomic deletion with row lock
+      await prisma.$transaction(async (tx) => {
+        // Prevent concurrent deletion/restore race conditions
+        await tx.$executeRaw`SELECT 1 FROM companies WHERE id = ${id} FOR UPDATE`;
+
+        // Clean up pending invitations if any
+        await tx.companyInvitation.deleteMany({ where: { companyId: id } });
+
+        // Clean up company audit logs
+        await tx.companyAuditLog.deleteMany({ where: { companyId: id } });
+
+        // Delete the company record
+        await tx.company.delete({ where: { id } });
+      });
 
       return {
         success: true,
@@ -547,6 +582,12 @@ export class CompanyService {
     }
 
     // Default: Soft delete (MOVE_TO_TRASH) with 30-day retention
+    if (existing.deletedAt !== null) {
+      const error = new Error(`Company "${existing.name}" is already in trash.`);
+      error.status = 400;
+      throw error;
+    }
+
     const softPayload = prepareSoftDeletePayload(actorAdmin?.id);
     const updated = await prisma.company.update({
       where: { id },
@@ -583,63 +624,73 @@ export class CompanyService {
    * Restore company from Trash
    */
   static async restoreCompany(id, actorAdmin = null) {
-    const existing = await prisma.company.findUnique({
-      where: { id },
-    });
-
-    if (!existing) {
-      const error = new Error(`Company with ID "${id}" was not found.`);
-      error.status = 404;
-      throw error;
-    }
-
-    if (existing.deletedAt === null) {
-      const error = new Error(`Company "${existing.name}" is not in trash.`);
+    if (!id) {
+      const error = new Error('Company ID is required');
       error.status = 400;
       throw error;
     }
 
-    // Verify 30-day retention window
-    const deletedTime = new Date(existing.deletedAt).getTime();
-    const daysSinceDeleted = (Date.now() - deletedTime) / (1000 * 3600 * 24);
-    if (daysSinceDeleted > 30 && actorAdmin?.role !== 'SUPER_ADMIN') {
-      const error = new Error(
-        `Cannot restore company "${existing.name}" because the 30-day retention period has expired. Only Super Administrators can override.`
-      );
-      error.status = 403;
-      throw error;
-    }
+    return await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT 1 FROM companies WHERE id = ${id} FOR UPDATE`;
+      const existing = await tx.company.findUnique({
+        where: { id },
+      });
 
-    const updated = await prisma.company.update({
-      where: { id },
-      data: {
-        deletedAt: null,
-        status: 'IN_REVIEW', // Restored to IN_REVIEW for administrative re-validation
-      },
-      include: {
-        industry: {
-          select: { id: true, name: true, code: true },
+      if (!existing) {
+        const error = new Error(`Company with ID "${id}" was not found.`);
+        error.status = 404;
+        throw error;
+      }
+
+      if (existing.deletedAt === null) {
+        const error = new Error(`Company "${existing.name}" is not in trash.`);
+        error.status = 400;
+        throw error;
+      }
+
+      // Verify 30-day retention window
+      const deletedTime = new Date(existing.deletedAt).getTime();
+      const daysSinceDeleted = (Date.now() - deletedTime) / (1000 * 3600 * 24);
+      if (daysSinceDeleted > 30 && actorAdmin?.role !== 'SUPER_ADMIN') {
+        const error = new Error(
+          `Cannot restore company "${existing.name}" because the 30-day retention period has expired. Only Super Administrators can override.`
+        );
+        error.status = 403;
+        throw error;
+      }
+
+      const updated = await tx.company.update({
+        where: { id },
+        data: {
+          deletedAt: null,
+          status: 'IN_REVIEW',
         },
-      },
-    });
+        include: {
+          industry: {
+            select: { id: true, name: true, code: true },
+          },
+        },
+      });
 
-    await logCompanyAction({
-      companyId: id,
-      adminId: actorAdmin?.id || null,
-      action: 'COMPANY_RESTORED',
-      actor: actorAdmin?.email || 'SYSTEM',
-      details: {
-        companyName: existing.name,
-        companyCode: existing.companyCode,
-        daysInTrash: Math.round(daysSinceDeleted),
-      },
-    });
+      await logCompanyAction({
+        companyId: id,
+        adminId: actorAdmin?.id || null,
+        action: 'COMPANY_RESTORED',
+        actor: actorAdmin?.email || 'SYSTEM',
+        details: {
+          companyName: existing.name,
+          companyCode: existing.companyCode,
+          daysInTrash: Math.round(daysSinceDeleted),
+        },
+        tx,
+      });
 
-    return {
-      success: true,
-      message: `Company "${existing.name}" was successfully restored from Trash.`,
-      data: updated,
-    };
+      return {
+        success: true,
+        message: `Company "${existing.name}" was successfully restored from Trash.`,
+        data: updated,
+      };
+    });
   }
 
   /**
@@ -856,8 +907,14 @@ export class CompanyService {
     // If companyId is supplied, attach directly to the company record
     if (companyId) {
       const company = await prisma.company.findUnique({ where: { id: companyId } });
-      if (!company || company.deletedAt !== null) {
-        const error = new Error('Company not found or has been moved to trash');
+      if (!company) {
+        const error = new Error('Company not found');
+        error.status = 404;
+        throw error;
+      }
+
+      if (company.deletedAt !== null) {
+        const error = new Error('Company has been moved to trash');
         error.status = 404;
         throw error;
       }
@@ -959,8 +1016,14 @@ export class CompanyService {
    */
   static async addCompanyDocument(companyId, docData, actorAdmin = null) {
     const company = await prisma.company.findUnique({ where: { id: companyId } });
-    if (!company || company.deletedAt !== null) {
-      const error = new Error('Company not found or has been moved to trash');
+    if (!company) {
+      const error = new Error('Company not found');
+      error.status = 404;
+      throw error;
+    }
+
+    if (company.deletedAt !== null) {
+      const error = new Error('Company has been moved to trash');
       error.status = 404;
       throw error;
     }
@@ -1019,8 +1082,14 @@ export class CompanyService {
    */
   static async reviewCompanyDocument(companyId, documentId, { decision, rejectionReason }, actorAdmin = null) {
     const company = await prisma.company.findUnique({ where: { id: companyId } });
-    if (!company || company.deletedAt !== null) {
-      const error = new Error('Company not found or has been moved to trash');
+    if (!company) {
+      const error = new Error('Company not found');
+      error.status = 404;
+      throw error;
+    }
+
+    if (company.deletedAt !== null) {
+      const error = new Error('Company has been moved to trash');
       error.status = 404;
       throw error;
     }
@@ -1071,8 +1140,14 @@ export class CompanyService {
    */
   static async deleteCompanyDocument(companyId, documentId, actorAdmin = null) {
     const company = await prisma.company.findUnique({ where: { id: companyId } });
-    if (!company || company.deletedAt !== null) {
-      const error = new Error('Company not found or has been moved to trash');
+    if (!company) {
+      const error = new Error('Company not found');
+      error.status = 404;
+      throw error;
+    }
+
+    if (company.deletedAt !== null) {
+      const error = new Error('Company has been moved to trash');
       error.status = 404;
       throw error;
     }
@@ -1121,8 +1196,14 @@ export class CompanyService {
       select: { id: true, status: true, deletedAt: true },
     });
 
-    if (!company || company.deletedAt !== null) {
-      const error = new Error('Company not found or has been moved to trash');
+    if (!company) {
+      const error = new Error('Company not found');
+      error.status = 404;
+      throw error;
+    }
+
+    if (company.deletedAt !== null) {
+      const error = new Error('Company has been moved to trash');
       error.status = 404;
       throw error;
     }
@@ -1240,8 +1321,14 @@ export class CompanyService {
       select: { id: true, status: true, deletedAt: true },
     });
 
-    if (!company || company.deletedAt !== null) {
-      const error = new Error('Company not found or has been moved to trash');
+    if (!company) {
+      const error = new Error('Company not found');
+      error.status = 404;
+      throw error;
+    }
+
+    if (company.deletedAt !== null) {
+      const error = new Error('Company has been moved to trash');
       error.status = 404;
       throw error;
     }

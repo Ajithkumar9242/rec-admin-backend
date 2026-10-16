@@ -1291,5 +1291,168 @@ describe('RecruiTrain Phase 2: Employer/Company Management Integration Suite', (
       });
       expect(record).toBeNull();
     });
+
+    it('allows permanent deletion (DELETE_PERMANENTLY) of an eligible company from TRASH', async () => {
+      const trashedComp = await prisma.company.create({
+        data: {
+          name: 'Trashed Eligible Corp',
+          companyCode: 'COMP-TRASH-PURGE',
+          email: 'trash_purge@test.com',
+          country: 'DE',
+          status: 'INACTIVE',
+          deletedAt: new Date(Date.now() - 5 * 24 * 3600 * 1000),
+        },
+      });
+
+      // Verify company is in trash
+      const inTrash = await prisma.company.findUnique({
+        where: { id: trashedComp.id },
+      });
+      expect(inTrash.deletedAt).not.toBeNull();
+
+      // Permanently delete from trash
+      const res = await request(app)
+        .delete(`/api/companies/${trashedComp.id}`)
+        .query({ mode: 'DELETE_PERMANENTLY' })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.mode).toBe('DELETE_PERMANENTLY');
+
+      // Verify completely purged from database
+      const record = await prisma.company.findUnique({
+        where: { id: trashedComp.id },
+      });
+      expect(record).toBeNull();
+    });
+
+    it('prevents permanent deletion (DELETE_PERMANENTLY) when company has dependent job postings', async () => {
+      const jobComp = await prisma.company.create({
+        data: {
+          name: 'Job Holder Corp',
+          companyCode: 'COMP-WITH-JOBS',
+          email: 'jobs@company.test',
+          country: 'DE',
+          status: 'ACTIVE',
+        },
+      });
+      createdCompanyIds.push(jobComp.id);
+
+      await prisma.job.create({
+        data: {
+          companyId: jobComp.id,
+          title: 'Senior DevOps Specialist',
+          description: 'Manage cloud clusters and pipelines',
+          status: 'DRAFT',
+        },
+      });
+
+      const res = await request(app)
+        .delete(`/api/companies/${jobComp.id}`)
+        .query({ mode: 'DELETE_PERMANENTLY' })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/1 job posting\(s\)/i);
+      expect(res.body.error).toMatch(/Move to Trash/i);
+
+      // Verify company was NOT deleted
+      const stillThere = await prisma.company.findUnique({ where: { id: jobComp.id } });
+      expect(stillThere).toBeTruthy();
+    });
+
+    it('rejects permanent deletion when attempted by standard ADMIN role without SUPER_ADMIN authorization', async () => {
+      // Create a standard ADMIN account
+      const standardAdminEmail = `standard_admin_${Date.now()}@recruitrain.test`;
+      const totpGen = generateTotpSecret(standardAdminEmail);
+      const stdAdmin = await prisma.admin.create({
+        data: {
+          email: standardAdminEmail,
+          name: 'Standard Admin Officer',
+          passwordHash: await hashPassword(TEST_PASSWORD),
+          role: 'ADMIN',
+          status: 'ACTIVE',
+          totpEnabled: true,
+          totpSecret: encryptTotpSecret(totpGen.secret),
+        },
+      });
+
+      // Login standard admin
+      const loginRes = await request(app)
+        .post('/api/auth/login')
+        .set('x-test-bypass-csrf', 'true')
+        .send({ email: standardAdminEmail, password: TEST_PASSWORD });
+
+      const code = authenticator.generate(totpGen.secret);
+      const verifyRes = await request(app)
+        .post('/api/auth/verify-2fa')
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', loginRes.headers['set-cookie'])
+        .send({ adminId: stdAdmin.id, code });
+
+      const standardAdminCookie = verifyRes.headers['set-cookie'];
+
+      const targetComp = await prisma.company.create({
+        data: {
+          name: 'Protected Target Corp',
+          companyCode: 'COMP-PROT-1',
+          email: 'prot@target.test',
+          country: 'DE',
+          status: 'IN_REVIEW',
+        },
+      });
+      createdCompanyIds.push(targetComp.id);
+
+      // Attempt permanent delete with standard ADMIN
+      const res = await request(app)
+        .delete(`/api/companies/${targetComp.id}`)
+        .query({ mode: 'DELETE_PERMANENTLY' })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', standardAdminCookie);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/Only Super Administrators/i);
+
+      // Verify company was not deleted
+      const stillThere = await prisma.company.findUnique({ where: { id: targetComp.id } });
+      expect(stillThere).toBeTruthy();
+    });
+
+    it('rejects MOVE_TO_TRASH when company is already in trash', async () => {
+      const alreadyTrashedComp = await prisma.company.create({
+        data: {
+          name: 'Already Trashed Corp',
+          companyCode: 'COMP-ALREADY-TRASH',
+          email: 'already@trash.test',
+          status: 'INACTIVE',
+          deletedAt: new Date(),
+        },
+      });
+      createdCompanyIds.push(alreadyTrashedComp.id);
+
+      const res = await request(app)
+        .delete(`/api/companies/${alreadyTrashedComp.id}`)
+        .query({ mode: 'MOVE_TO_TRASH' })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/already in trash/i);
+    });
+
+    it('returns 404 when attempting to delete non-existent company', async () => {
+      const res = await request(app)
+        .delete('/api/companies/a0000000-0000-0000-0000-000000000000')
+        .query({ mode: 'DELETE_PERMANENTLY' })
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', adminCookie);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toMatch(/was not found/i);
+    });
   });
 });

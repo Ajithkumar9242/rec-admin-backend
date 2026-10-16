@@ -16,6 +16,125 @@ function createHttpError(message, statusCode) {
 
 export class JobService {
   /**
+   * List jobs for Admin Directory across all companies.
+   * Supports filtering by search, status, hiringScope, employmentType, workArrangement, companyId.
+   */
+  static async listAdminJobs({
+    page = 1,
+    limit = 10,
+    search,
+    status,
+    hiringScope,
+    employmentType,
+    workArrangement,
+    companyId,
+    sortBy = 'createdAt',
+    sortOrder = 'desc',
+  }) {
+    const skip = (page - 1) * limit;
+
+    const where = {
+      deletedAt: null,
+      ...(status ? { status } : {}),
+      ...(hiringScope ? { hiringScope } : {}),
+      ...(employmentType ? { employmentType } : {}),
+      ...(workArrangement ? { workArrangement } : {}),
+      ...(companyId ? { companyId } : {}),
+      ...(search
+        ? {
+            OR: [
+              { title: { contains: search, mode: 'insensitive' } },
+              { jobCode: { contains: search, mode: 'insensitive' } },
+              { department: { contains: search, mode: 'insensitive' } },
+              { city: { contains: search, mode: 'insensitive' } },
+              { company: { name: { contains: search, mode: 'insensitive' } } },
+              { company: { companyCode: { contains: search, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
+
+    const orderBy = {};
+    if (sortBy === 'title') {
+      orderBy.title = sortOrder;
+    } else if (sortBy === 'publishedAt') {
+      orderBy.publishedAt = sortOrder;
+    } else if (sortBy === 'status') {
+      orderBy.status = sortOrder;
+    } else if (sortBy === 'openings') {
+      orderBy.openings = sortOrder;
+    } else {
+      orderBy.createdAt = sortOrder;
+    }
+
+    const [total, items, statusCounts] = await Promise.all([
+      prisma.job.count({ where }),
+      prisma.job.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy,
+        include: {
+          company: {
+            select: {
+              id: true,
+              name: true,
+              companyCode: true,
+              status: true,
+              country: true,
+              city: true,
+              hiringDomestic: true,
+              hiringEu: true,
+              hiringInternational: true,
+            },
+          },
+          industry: {
+            select: {
+              id: true,
+              name: true,
+              code: true,
+            },
+          },
+          _count: {
+            select: { applications: true },
+          },
+        },
+      }),
+      prisma.job.groupBy({
+        by: ['status'],
+        where: { deletedAt: null },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const counts = {
+      ALL: 0,
+      DRAFT: 0,
+      PENDING_APPROVAL: 0,
+      PUBLISHED: 0,
+      CLOSED: 0,
+      ARCHIVED: 0,
+    };
+    for (const group of statusCounts) {
+      if (counts[group.status] !== undefined) {
+        counts[group.status] = group._count._all;
+      }
+      counts.ALL += group._count._all;
+    }
+
+    return {
+      items,
+      counts,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  /**
    * Create a new job posting for a company.
    * Gated by company active state, company hiring preference capability,
    * subscription quotas, and platform auto-approval policy.
@@ -23,7 +142,7 @@ export class JobService {
   static async createJob(jobData, actorContext = {}) {
     const { companyId, hiringScope = 'DOMESTIC', status = 'DRAFT' } = jobData;
 
-    // 1. Validate company exists, is not in trash, and is active
+    // 1. Validate company exists, is not in trash, and is eligible
     const company = await prisma.company.findUnique({
       where: { id: companyId },
       select: {
@@ -65,18 +184,19 @@ export class JobService {
       );
     }
 
-    // 3. For published or pending approval jobs, enforce active company status
-    if (['PUBLISHED', 'PENDING_APPROVAL'].includes(status) && company.status !== 'ACTIVE') {
-      throw createHttpError(
-        `Company status is "${company.status}". Companies must be ACTIVE to publish or submit jobs for approval.`,
-        400
-      );
+    // 3. For published or pending approval jobs, enforce active company status and required publication fields
+    if (['PUBLISHED', 'PENDING_APPROVAL'].includes(status)) {
+      if (company.status !== 'ACTIVE') {
+        throw createHttpError(
+          `Company status is "${company.status}". Companies must be ACTIVE to publish or submit jobs for approval.`,
+          400
+        );
+      }
     }
 
     return await prisma.$transaction(async (tx) => {
       // 4. Enforce subscription quota when creating directly in active publishing status
       if (['PUBLISHED', 'PENDING_APPROVAL'].includes(status)) {
-        // Row-level lock company to prevent race conditions during concurrent job publishing
         await tx.$executeRaw`SELECT 1 FROM companies WHERE id = ${companyId} FOR UPDATE`;
 
         await EntitlementService.checkEntitlement({
@@ -127,6 +247,16 @@ export class JobService {
               name: true,
               companyCode: true,
               status: true,
+              hiringDomestic: true,
+              hiringEu: true,
+              hiringInternational: true,
+            },
+          },
+          industry: {
+            select: {
+              id: true,
+              name: true,
+              code: true,
             },
           },
         },
@@ -147,11 +277,30 @@ export class JobService {
           select: {
             id: true,
             name: true,
+            legalName: true,
             companyCode: true,
             status: true,
+            country: true,
+            city: true,
             hiringDomestic: true,
             hiringEu: true,
             hiringInternational: true,
+            users: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                role: true,
+              },
+            },
+          },
+        },
+        industry: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
           },
         },
         _count: {
@@ -167,6 +316,85 @@ export class JobService {
     }
 
     return job;
+  }
+
+  /**
+   * List applicants for a specific job posting
+   */
+  static async getJobApplicants(jobId, { page = 1, limit = 10, search, status, stageId }) {
+    const job = await prisma.job.findUnique({
+      where: { id: jobId },
+      select: { id: true, title: true, companyId: true, status: true },
+    });
+    if (!job) {
+      throw createHttpError('Job posting not found.', 404);
+    }
+
+    const skip = (page - 1) * limit;
+    const where = {
+      jobId,
+      ...(status ? { status } : {}),
+      ...(stageId ? { currentStageId: stageId } : {}),
+      ...(search
+        ? {
+            OR: [
+              { candidate: { firstName: { contains: search, mode: 'insensitive' } } },
+              { candidate: { lastName: { contains: search, mode: 'insensitive' } } },
+              { candidate: { email: { contains: search, mode: 'insensitive' } } },
+              { candidate: { currentLocation: { contains: search, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
+
+    const [total, items] = await Promise.all([
+      prisma.jobApplication.count({ where }),
+      prisma.jobApplication.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { appliedAt: 'desc' },
+        include: {
+          candidate: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              headline: true,
+              summary: true,
+              country: true,
+              city: true,
+              currentLocation: true,
+              willingToRelocate: true,
+              resumeUrl: true,
+              resumeFileName: true,
+              createdAt: true,
+            },
+          },
+          currentStage: {
+            select: {
+              id: true,
+              name: true,
+              category: true,
+              order: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    return {
+      job,
+      items,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
   }
 
   /**
@@ -251,10 +479,132 @@ export class JobService {
         company: {
           select: { id: true, name: true, companyCode: true, status: true },
         },
+        industry: {
+          select: { id: true, name: true, code: true },
+        },
       },
     });
 
     return updated;
+  }
+
+  /**
+   * Update Job Status (Suspend, Inactive/Close, Reactivate)
+   */
+  static async updateJobStatus(id, { status, reason }, actorContext = {}) {
+    const existingJob = await prisma.job.findUnique({
+      where: { id },
+      include: { company: true },
+    });
+
+    if (!existingJob || existingJob.deletedAt !== null) {
+      throw createHttpError('Job posting not found.', 404);
+    }
+
+    const company = existingJob.company;
+    if (company.deletedAt !== null) {
+      throw createHttpError('Target company is currently in trash.', 400);
+    }
+
+    if (['PUBLISHED', 'PENDING_APPROVAL'].includes(status)) {
+      if (company.status !== 'ACTIVE') {
+        throw createHttpError(
+          `Company status is "${company.status}". Companies must be ACTIVE to publish jobs.`,
+          400
+        );
+      }
+
+      if (existingJob.hiringScope === 'DOMESTIC' && !company.hiringDomestic) {
+        throw createHttpError('Company is not configured for domestic hiring.', 400);
+      }
+      if (existingJob.hiringScope === 'EU' && !company.hiringEu) {
+        throw createHttpError('Company is not configured for EU hiring.', 400);
+      }
+      if (existingJob.hiringScope === 'INTERNATIONAL' && !company.hiringInternational) {
+        throw createHttpError('Company is not configured for international hiring.', 400);
+      }
+
+      if (!['PUBLISHED', 'PENDING_APPROVAL'].includes(existingJob.status)) {
+        await EntitlementService.checkEntitlement({
+          companyId: company.id,
+          resourceType: 'jobPosting',
+          requestedCount: 1,
+        });
+      }
+    }
+
+    const updated = await prisma.job.update({
+      where: { id },
+      data: {
+        status,
+        ...(status === 'PUBLISHED' && !existingJob.publishedAt ? { publishedAt: new Date() } : {}),
+        rejectionReason: reason || existingJob.rejectionReason,
+      },
+      include: {
+        company: {
+          select: { id: true, name: true, companyCode: true, status: true },
+        },
+      },
+    });
+
+    return updated;
+  }
+
+  /**
+   * Parse plain-text (.txt) file for job description upload.
+   * Strictly enforces .txt extension, validates encoding and size, rejects binary and HTML.
+   */
+  static parseDescriptionFile(file) {
+    if (!file) {
+      throw createHttpError('No file uploaded.', 400);
+    }
+
+    const originalName = file.originalname || '';
+    if (!originalName.toLowerCase().endsWith('.txt')) {
+      throw createHttpError('Invalid file type. Only plain-text (.txt) files are accepted.', 400);
+    }
+
+    // Size limit: 500 KB max
+    if (file.size > 500 * 1024) {
+      throw createHttpError('File size exceeds 500 KB limit for plain-text descriptions.', 400);
+    }
+
+    const buffer = file.buffer;
+    const sig = inspectFileSignature(buffer);
+    if (sig.isExecutable || sig.detectedType === 'application/pdf') {
+      throw createHttpError('Invalid file format. Uploaded file is not valid plain text.', 400);
+    }
+
+    // Reject null bytes to guard against binary executables masquerading as text
+    for (let i = 0; i < Math.min(buffer.length, 1024); i++) {
+      if (buffer[i] === 0) {
+        throw createHttpError('Binary content detected. Only plain-text (.txt) files are accepted.', 400);
+      }
+    }
+
+    let text;
+    try {
+      text = buffer.toString('utf-8');
+    } catch {
+      throw createHttpError('Unable to decode file as UTF-8 plain text.', 400);
+    }
+
+    // Strip HTML markup so content cannot be executed or rendered as markup
+    const sanitized = text
+      .replace(/<[^>]*>?/gm, '')
+      .replace(/\r\n/g, '\n')
+      .trim();
+
+    if (!sanitized) {
+      throw createHttpError('Uploaded text file is empty.', 400);
+    }
+
+    return {
+      success: true,
+      text: sanitized,
+      fileName: originalName,
+      fileSize: file.size,
+    };
   }
 
   /**
@@ -506,6 +856,7 @@ export class JobService {
    * Apply for a Job posting
    * Enforces:
    * - Job is active, published, and not expired
+   * - Applicant limit enforcement with race condition handling
    * - Duplicate application check (409 Conflict)
    * - Resume format and MIME verification against platform settings
    * - Automatic initial recruitment stage assignment
@@ -516,26 +867,44 @@ export class JobService {
       where: { id: 'global' },
     });
 
-    const job = await prisma.job.findFirst({
-      where: {
-        id: jobId,
-        status: 'PUBLISHED',
-        deletedAt: null,
-        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-        company: {
-          deletedAt: null,
-          status: 'ACTIVE',
-        },
-      },
+    const job = await prisma.job.findUnique({
+      where: { id: jobId },
       select: {
         id: true,
         title: true,
+        status: true,
+        deletedAt: true,
+        expiresAt: true,
         companyId: true,
+        maxApplicantsLimit: true,
+        autoCloseOnLimit: true,
+        company: {
+          select: {
+            id: true,
+            status: true,
+            deletedAt: true,
+          },
+        },
       },
     });
 
-    if (!job) {
-      throw createHttpError('Job posting is not open for applications.', 404);
+    if (!job || job.deletedAt !== null || job.company?.deletedAt !== null) {
+      throw createHttpError('Job posting not found.', 404);
+    }
+
+    if (
+      job.status === 'CLOSED' &&
+      job.maxApplicantsLimit &&
+      job.autoCloseOnLimit
+    ) {
+      throw createHttpError(
+        'This job posting has reached its maximum application limit and is no longer accepting submissions.',
+        400
+      );
+    }
+
+    if (job.status !== 'PUBLISHED' || job.company?.status !== 'ACTIVE' || (job.expiresAt && job.expiresAt <= now)) {
+      throw createHttpError('Job posting is not open for applications.', 400);
     }
 
     const email = applicationData.email.toLowerCase().trim();
@@ -549,7 +918,11 @@ export class JobService {
       if (sig.isExecutable) {
         throw createHttpError('Binary content inspection detected an executable payload. Upload rejected.', 400);
       }
-      if (applicationData.resumeFileName?.toLowerCase().endsWith('.pdf') && sig.detectedType !== 'application/pdf' && sig.detectedType !== 'unknown') {
+      if (
+        applicationData.resumeFileName?.toLowerCase().endsWith('.pdf') &&
+        sig.detectedType !== 'application/pdf' &&
+        sig.detectedType !== 'unknown'
+      ) {
         throw createHttpError('File extension is .pdf but binary content signature is not a valid PDF document.', 400);
       }
     }
@@ -589,8 +962,30 @@ export class JobService {
       orderBy: { order: 'asc' },
     });
 
-    // 4. Atomic candidate upsert & application creation
+    // 4. Atomic applicant limit check, candidate upsert & application creation
     const application = await prisma.$transaction(async (tx) => {
+      // Row lock job to serialize applications and prevent concurrent applicant-limit bypasses
+      await tx.$executeRaw`SELECT 1 FROM jobs WHERE id = ${jobId} FOR UPDATE`;
+
+      if (job.maxApplicantsLimit && job.maxApplicantsLimit > 0) {
+        const currentCount = await tx.jobApplication.count({
+          where: { jobId },
+        });
+
+        if (currentCount >= job.maxApplicantsLimit) {
+          if (job.autoCloseOnLimit) {
+            await tx.job.update({
+              where: { id: jobId },
+              data: { status: 'CLOSED' },
+            });
+          }
+          throw createHttpError(
+            'This job posting has reached its maximum application limit and is no longer accepting submissions.',
+            400
+          );
+        }
+      }
+
       const candidate = await tx.candidate.upsert({
         where: { email },
         update: {
@@ -643,6 +1038,17 @@ export class JobService {
           },
         },
       });
+
+      // If auto-close enabled and this application reached the limit, close now
+      if (job.maxApplicantsLimit && job.autoCloseOnLimit) {
+        const newCount = await tx.jobApplication.count({ where: { jobId } });
+        if (newCount >= job.maxApplicantsLimit) {
+          await tx.job.update({
+            where: { id: jobId },
+            data: { status: 'CLOSED' },
+          });
+        }
+      }
 
       return app;
     });

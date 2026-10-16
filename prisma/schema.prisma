@@ -417,6 +417,7 @@ model Industry {
   parent      Industry?           @relation("IndustryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
   children    Industry[]          @relation("IndustryHierarchy")
   companies   Company[]
+  jobs        Job[]
   status      ConfigurationStatus @default(ACTIVE)
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
@@ -658,36 +659,57 @@ enum ApplicationStatus {
 }
 
 model Job {
-  id              String             @id @default(uuid())
-  companyId       String
-  company         Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  title           String
-  slug            String?
-  description     String
-  requirements    String?
-  benefits        String?
-  department      String?
-  location        String?
-  country         String             @default("DE")
-  city            String?
-  workArrangement JobWorkArrangement @default(ON_SITE)
-  employmentType  JobEmploymentType  @default(FULL_TIME)
-  hiringScope     JobHiringScope     @default(DOMESTIC)
-  currency        String             @default("EUR")
-  minSalary       Decimal?           @db.Decimal(10, 2)
-  maxSalary       Decimal?           @db.Decimal(10, 2)
-  status          JobStatus          @default(DRAFT)
-  publishedAt     DateTime?
-  expiresAt       DateTime?
-  createdById     String?
-  approvedAt      DateTime?
-  approvedBy      String?
-  rejectionReason String?
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
-  deletedAt       DateTime?
+  id                 String             @id @default(uuid())
+  companyId          String
+  company            Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  title              String
+  slug               String?
+  jobCode            String?
+  industryId         String?
+  industry           Industry?          @relation(fields: [industryId], references: [id], onDelete: SetNull)
+  keywords           String[]           @default([])
+  department         String?
+  profession         String?
+  openings           Int                @default(1)
+  hiringManagerId    String?
+  recruiterId        String?
+  targetJoiningDate  DateTime?
+  compensationType   String             @default("ANNUAL")
+  salaryNegotiable   Boolean            @default(false)
+  minExperience      Int                @default(0)
+  maxExperience      Int                @default(5)
+  maxApplicantsLimit Int?
+  autoCloseOnLimit   Boolean            @default(false)
+  address            String?
+  city               String?
+  state              String?
+  country            String             @default("DE")
+  location           String?
+  workArrangement    JobWorkArrangement @default(ON_SITE)
+  employmentType     JobEmploymentType  @default(FULL_TIME)
+  hiringScope        JobHiringScope     @default(DOMESTIC)
+  currency           String             @default("EUR")
+  minSalary          Decimal?           @db.Decimal(10, 2)
+  maxSalary          Decimal?           @db.Decimal(10, 2)
+  germanLevel        String             @default("B2")
+  englishLevel       String?
+  otherLanguages     Json?
+  description        String
+  responsibilities   String?
+  requirements       String?
+  benefits           String?
+  status             JobStatus          @default(DRAFT)
+  publishedAt        DateTime?
+  expiresAt          DateTime?
+  createdById        String?
+  approvedAt         DateTime?
+  approvedBy         String?
+  rejectionReason    String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  deletedAt          DateTime?
 
-  applications    JobApplication[]
+  applications       JobApplication[]
 
   @@index([companyId])
   @@index([status])
@@ -696,6 +718,8 @@ model Job {
   @@index([city])
   @@index([publishedAt])
   @@index([expiresAt])
+  @@index([jobCode])
+  @@index([industryId])
   @@map("jobs")
 }
 
