@@ -6,6 +6,7 @@ import configurationRoutes from '../modules/configuration/configuration.routes.j
 import companyRoutes from '../modules/companies/company.routes.js';
 import jobRoutes from '../modules/jobs/job.routes.js';
 import candidateRoutes from '../modules/candidates/candidate.routes.js';
+import { teamRouter, roleRouter } from '../modules/teams/team.routes.js';
 
 const router = Router();
 
@@ -26,5 +27,7 @@ router.use('/configuration', configurationRoutes);
 router.use('/companies', companyRoutes);
 router.use('/jobs', jobRoutes);
 router.use('/candidates', candidateRoutes);
+router.use('/teams', teamRouter);
+router.use('/roles', roleRouter);
 
 export default router;

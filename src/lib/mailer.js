@@ -299,6 +299,42 @@ export async function sendCompanyAdminInvitationEmail({ to, recipientName, compa
 }
 
 /**
+ * Team Member Invitation Email
+ */
+export async function sendTeamMemberInvitationEmail({ to, recipientName, companyName, teamName, roleName, invitationUrl, expiresHours = 48 }) {
+  const safeName = escapeHtml(recipientName || 'Team Member');
+  const safeCompany = companyName ? escapeHtml(companyName) : 'RecruiTrain';
+  const safeTeam = teamName ? escapeHtml(teamName) : 'the team';
+  const safeRole = roleName ? escapeHtml(roleName) : 'Member';
+  const subject = `You've been invited to join ${safeTeam} on RecruiTrain`;
+
+  const html = `
+    ${EMAIL_HEADER}
+    <p style="font-size: 15px; line-height: 1.5;">Hello ${safeName},</p>
+    <p style="font-size: 15px; line-height: 1.5;">
+      You have been invited to join <strong>${safeTeam}</strong> at <strong>${safeCompany}</strong> as <strong>${safeRole}</strong>.
+    </p>
+    <p style="font-size: 15px; line-height: 1.5;">
+      Please click below to activate your account and set up your confidential credentials:
+    </p>
+    <div style="margin: 32px 0;">
+      <a href="${invitationUrl}" style="background-color: #16313f; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block;">
+        Accept Invitation &amp; Join Team
+      </a>
+    </div>
+    <div style="background-color: #f0f9ff; border-left: 4px solid #0284c7; padding: 12px 16px; margin: 20px 0;">
+      <p style="margin: 0; font-size: 14px; color: #0369a1;">
+        <strong>Security Notice:</strong><br />
+        This is a single-use secure link valid for <strong>${expiresHours} hours</strong>. You will be prompted to choose your own secure password. We will never send you a temporary or shared password.
+      </p>
+    </div>
+    ${EMAIL_FOOTER}
+  `;
+
+  return dispatchMail({ to, subject, html });
+}
+
+/**
  * 2. Company Application / Onboarding Submission Acknowledgement
  */
 export async function sendCompanySubmissionAckEmail({ to, recipientName, companyName }) {

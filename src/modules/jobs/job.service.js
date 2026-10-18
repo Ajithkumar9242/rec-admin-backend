@@ -554,15 +554,8 @@ export class JobService {
       ['PUBLISHED', 'PENDING_APPROVAL'].includes(updateData.status) &&
       !['PUBLISHED', 'PENDING_APPROVAL'].includes(existingJob.status);
 
-    if (isActivating) {
-      if (company.status !== 'ACTIVE') {
-        throw createHttpError('Cannot publish jobs while company is not in ACTIVE status.', 400);
-      }
-      await EntitlementService.checkEntitlement({
-        companyId: company.id,
-        resourceType: 'jobPosting',
-        requestedCount: 1,
-      });
+    if (isActivating && company.status !== 'ACTIVE') {
+      throw createHttpError('Cannot publish jobs while company is not in ACTIVE status.', 400);
     }
 
     let statusToSet = updateData.status;
@@ -588,32 +581,44 @@ export class JobService {
       }
     }
 
-    const updated = await prisma.job.update({
-      where: { id },
-      data: {
-        ...updateData,
-        workArrangement: updatedArrangements[0] || 'ON_SITE',
-        workArrangements: updatedArrangements,
-        hiringScope: updatedScopes[0] || 'DOMESTIC',
-        hiringScopes: updatedScopes,
-        ...(updateData.germanLevel !== undefined ? { germanLevel: updateData.germanLevel || null } : {}),
-        ...(updateData.englishLevel !== undefined ? { englishLevel: updateData.englishLevel || null } : {}),
-        ...(statusToSet ? { status: statusToSet } : {}),
-        ...(statusToSet === 'PUBLISHED' && !existingJob.publishedAt ? { publishedAt: new Date() } : {}),
-        approvedAt,
-        approvedBy,
-      },
-      include: {
-        company: {
-          select: { id: true, name: true, companyCode: true, status: true },
-        },
-        industry: {
-          select: { id: true, name: true, code: true },
-        },
-      },
-    });
+    return await prisma.$transaction(async (tx) => {
+      if (isActivating) {
+        await tx.$executeRaw`SELECT 1 FROM companies WHERE id = ${company.id} FOR UPDATE`;
+        await EntitlementService.checkEntitlement({
+          companyId: company.id,
+          resourceType: 'jobPosting',
+          requestedCount: 1,
+          tx,
+        });
+      }
 
-    return updated;
+      const updated = await tx.job.update({
+        where: { id },
+        data: {
+          ...updateData,
+          workArrangement: updatedArrangements[0] || 'ON_SITE',
+          workArrangements: updatedArrangements,
+          hiringScope: updatedScopes[0] || 'DOMESTIC',
+          hiringScopes: updatedScopes,
+          ...(updateData.germanLevel !== undefined ? { germanLevel: updateData.germanLevel || null } : {}),
+          ...(updateData.englishLevel !== undefined ? { englishLevel: updateData.englishLevel || null } : {}),
+          ...(statusToSet ? { status: statusToSet } : {}),
+          ...(statusToSet === 'PUBLISHED' && !existingJob.publishedAt ? { publishedAt: new Date() } : {}),
+          approvedAt,
+          approvedBy,
+        },
+        include: {
+          company: {
+            select: { id: true, name: true, companyCode: true, status: true },
+          },
+          industry: {
+            select: { id: true, name: true, code: true },
+          },
+        },
+      });
+
+      return updated;
+    });
   }
 
   /**
@@ -634,6 +639,10 @@ export class JobService {
       throw createHttpError('Target company is currently in trash.', 400);
     }
 
+    const isActivating =
+      ['PUBLISHED', 'PENDING_APPROVAL'].includes(status) &&
+      !['PUBLISHED', 'PENDING_APPROVAL'].includes(existingJob.status);
+
     if (['PUBLISHED', 'PENDING_APPROVAL'].includes(status)) {
       if (company.status !== 'ACTIVE') {
         throw createHttpError(
@@ -651,31 +660,35 @@ export class JobService {
       if (existingJob.hiringScope === 'INTERNATIONAL' && !company.hiringInternational) {
         throw createHttpError('Company is not configured for international hiring.', 400);
       }
+    }
 
-      if (!['PUBLISHED', 'PENDING_APPROVAL'].includes(existingJob.status)) {
+    return await prisma.$transaction(async (tx) => {
+      if (isActivating) {
+        await tx.$executeRaw`SELECT 1 FROM companies WHERE id = ${company.id} FOR UPDATE`;
         await EntitlementService.checkEntitlement({
           companyId: company.id,
           resourceType: 'jobPosting',
           requestedCount: 1,
+          tx,
         });
       }
-    }
 
-    const updated = await prisma.job.update({
-      where: { id },
-      data: {
-        status,
-        ...(status === 'PUBLISHED' && !existingJob.publishedAt ? { publishedAt: new Date() } : {}),
-        rejectionReason: reason || existingJob.rejectionReason,
-      },
-      include: {
-        company: {
-          select: { id: true, name: true, companyCode: true, status: true },
+      const updated = await tx.job.update({
+        where: { id },
+        data: {
+          status,
+          ...(status === 'PUBLISHED' && !existingJob.publishedAt ? { publishedAt: new Date() } : {}),
+          rejectionReason: reason || existingJob.rejectionReason,
         },
-      },
-    });
+        include: {
+          company: {
+            select: { id: true, name: true, companyCode: true, status: true },
+          },
+        },
+      });
 
-    return updated;
+      return updated;
+    });
   }
 
   /**
@@ -843,11 +856,28 @@ export class JobService {
         );
       }
 
+      const targetStatus = actorContext?.status || 'DRAFT';
+      if (['PUBLISHED', 'PENDING_APPROVAL'].includes(targetStatus)) {
+        if (existingJob.company.status !== 'ACTIVE') {
+          throw createHttpError(
+            `Company status is "${existingJob.company.status}". Companies must be ACTIVE to publish jobs.`,
+            400
+          );
+        }
+        await tx.$executeRaw`SELECT 1 FROM companies WHERE id = ${existingJob.company.id} FOR UPDATE`;
+        await EntitlementService.checkEntitlement({
+          companyId: existingJob.company.id,
+          resourceType: 'jobPosting',
+          requestedCount: 1,
+          tx,
+        });
+      }
+
       const updated = await tx.job.update({
         where: { id },
         data: {
           deletedAt: null,
-          status: 'DRAFT',
+          status: targetStatus,
         },
         include: {
           company: {

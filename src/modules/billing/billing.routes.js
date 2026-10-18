@@ -40,6 +40,7 @@ router.use(require2FAVerified);
 // Stripe Configuration Status
 router.get('/stripe/config', BillingController.getStripeConfig);
 router.post('/stripe/checkout-session', BillingController.createCheckoutSession);
+router.post('/stripe/portal-session', BillingController.createPortalSession);
 
 // Plans
 router.get('/plans', BillingController.listPlans);
@@ -47,6 +48,7 @@ router.get('/plans/:id', BillingController.getPlan);
 router.post('/plans', requireRole('ADMIN', 'SUPER_ADMIN'), validate(createPlanSchema), BillingController.createPlan);
 router.patch('/plans/:id', requireRole('ADMIN', 'SUPER_ADMIN'), validate(updatePlanSchema), BillingController.updatePlan);
 router.patch('/plans/:id/status', requireRole('ADMIN', 'SUPER_ADMIN'), validate(planStatusToggleSchema), BillingController.togglePlanStatus);
+router.post('/plans/:id/restore', requireRole('ADMIN', 'SUPER_ADMIN'), BillingController.restorePlan);
 router.delete('/plans/:id', requireRole('SUPER_ADMIN'), BillingController.archivePlan);
 
 // Subscriptions

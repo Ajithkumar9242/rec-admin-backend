@@ -700,6 +700,27 @@ class StripeService {
       });
     }
   }
+
+  /**
+   * Creates a Stripe Customer Portal session for managing subscriptions and payment methods.
+   *
+   * @param {object} params
+   * @param {string} params.customerId Stripe customer ID
+   * @param {string} params.returnUrl URL to redirect back to
+   * @returns {Promise<any>}
+   */
+  async createCustomerPortalSession({ customerId, returnUrl }) {
+    if (!this.isConfigured() || !this._client) {
+      throw new StripeNotConfiguredError();
+    }
+    if (!customerId) {
+      throw new Error('customerId is required to create a Stripe Customer Portal session.');
+    }
+    return this._client.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: returnUrl,
+    });
+  }
 }
 
 export const stripeService = new StripeService();

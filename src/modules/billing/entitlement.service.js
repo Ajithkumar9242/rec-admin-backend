@@ -57,11 +57,15 @@ export class SubscriptionRevokedError extends SubscriptionError {
 export class QuotaExceededError extends SubscriptionError {
   constructor(resourceType, limit, currentUsage, requested) {
     super(
-      `Entitlement quota exceeded for "${resourceType}". Limit: ${limit}, Current Usage: ${currentUsage}, Requested: ${requested}.`,
+      `Entitlement quota exceeded for "${resourceType}". Current usage: ${currentUsage}, requested: ${requested}, limit: ${limit}.`,
       'QUOTA_EXCEEDED',
       { resourceType, limit, currentUsage, requested }
     );
     this.statusCode = 429;
+    this.limit = limit;
+    this.currentUsage = currentUsage;
+    this.requested = requested;
+    this.resourceType = resourceType;
   }
 }
 
@@ -192,13 +196,21 @@ export class EntitlementService {
     }
 
     if (resourceType === 'teamMember') {
-      // Team members table not yet integrated into this admin release
+      const limit = subscription.teamMemberLimit;
+      const currentUsage = await tx.companyUser.count({
+        where: { companyId },
+      });
+
+      if (currentUsage + requestedCount > limit) {
+        throw new QuotaExceededError('teamMember', limit, currentUsage, requestedCount);
+      }
+
       return {
         allowed: true,
         subscription,
-        limit: subscription.teamMemberLimit,
-        usage: null,
-        integrated: false,
+        limit,
+        usage: currentUsage,
+        integrated: true,
       };
     }
 
@@ -295,13 +307,20 @@ export class EntitlementService {
     try {
       const subscription = await this.resolveEffectiveSubscription(companyId, tx);
 
-      const activeJobCount = await tx.job.count({
-        where: {
-          companyId,
-          status: { in: ['PUBLISHED', 'PENDING_APPROVAL'] },
-          deletedAt: null,
-        },
-      });
+      const [activeJobCount, teamMemberCount] = await Promise.all([
+        tx.job.count({
+          where: {
+            companyId,
+            status: { in: ['PUBLISHED', 'PENDING_APPROVAL'] },
+            deletedAt: null,
+          },
+        }),
+        tx.companyUser.count({
+          where: {
+            companyId,
+          },
+        }),
+      ]);
 
       return {
         hasActiveSubscription: true,
@@ -338,8 +357,8 @@ export class EntitlementService {
           },
           teamMembers: {
             limit: subscription.teamMemberLimit,
-            usage: null,
-            remaining: null,
+            usage: teamMemberCount,
+            remaining: Math.max(0, subscription.teamMemberLimit - teamMemberCount),
             unit: 'seats',
             resetPolicy: 'concurrent_active',
             integrated: false,

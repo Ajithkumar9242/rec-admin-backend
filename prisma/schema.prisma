@@ -57,6 +57,7 @@ model Admin {
   billingAuditLogs    BillingAuditLog[]
   platformConfigAuditLogs PlatformConfigAuditLog[]
   companyAuditLogs    CompanyAuditLog[]
+  teamMembers         TeamMember[]
 
   @@map("admins")
 }
@@ -218,6 +219,8 @@ model Company {
   auditLogs             CompanyAuditLog[]
   jobs                  Job[]
   candidates            Candidate[]
+  teams                 Team[]
+  roles                 Role[]
 
   @@index([name])
   @@index([status])
@@ -568,10 +571,14 @@ model CompanyUser {
   updatedAt             DateTime          @updatedAt
 
   invitations           CompanyInvitation[]
+  customRoleId          String?
+  customRole            Role?               @relation(fields: [customRoleId], references: [id], onDelete: SetNull)
+  teamMembers           TeamMember[]
 
   @@unique([companyId, email])
   @@index([companyId])
   @@index([email])
+  @@index([customRoleId])
   @@map("company_users")
 }
 
@@ -583,6 +590,8 @@ model CompanyInvitation {
   user        CompanyUser?    @relation(fields: [userId], references: [id], onDelete: Cascade)
   email       String
   role        CompanyUserRole @default(ADMIN)
+  customRoleId String?
+  customRole  Role?           @relation(fields: [customRoleId], references: [id], onDelete: SetNull)
   tokenHash   String          @unique
   expiresAt   DateTime
   acceptedAt  DateTime?
@@ -592,6 +601,7 @@ model CompanyInvitation {
   @@index([companyId])
   @@index([email])
   @@index([tokenHash])
+  @@index([customRoleId])
   @@map("company_invitations")
 }
 
@@ -859,5 +869,82 @@ model JobApplication {
   @@map("job_applications")
 }
 
+// ----------------------------------------------------
+// Phase 5: Teams & Permission Management (RBAC)
+// ----------------------------------------------------
 
+model Team {
+  id          String       @id @default(uuid())
+  name        String
+  description String?
+  companyId   String?
+  company     Company?     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  deletedAt   DateTime?
 
+  members     TeamMember[]
+
+  @@index([companyId])
+  @@index([name])
+  @@map("teams")
+}
+
+model Role {
+  id          String           @id @default(uuid())
+  name        String
+  code        String
+  description String?
+  isSystem    Boolean          @default(false)
+  companyId   String?
+  company     Company?         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  permissions  RolePermission[]
+  teamMembers  TeamMember[]
+  companyUsers CompanyUser[]
+  invitations  CompanyInvitation[]
+
+  @@index([companyId])
+  @@index([code])
+  @@map("roles")
+}
+
+model RolePermission {
+  id        String   @id @default(uuid())
+  roleId    String
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  module    String   // DASHBOARD, COMPANIES, CANDIDATES, JOBS, APPLICATIONS, TEAMS, BILLING
+  action    String   // READ, CREATE, EDIT, DELETE, EXPORT
+  allowed   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([roleId, module, action])
+  @@index([roleId])
+  @@index([module])
+  @@map("role_permissions")
+}
+
+model TeamMember {
+  id            String       @id @default(uuid())
+  teamId        String
+  team          Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  adminId       String?
+  admin         Admin?       @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  companyUserId String?
+  companyUser   CompanyUser? @relation(fields: [companyUserId], references: [id], onDelete: Cascade)
+  roleId        String?
+  role          Role?        @relation(fields: [roleId], references: [id], onDelete: SetNull)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([teamId, adminId])
+  @@unique([teamId, companyUserId])
+  @@index([teamId])
+  @@index([adminId])
+  @@index([companyUserId])
+  @@index([roleId])
+  @@map("team_members")
+}

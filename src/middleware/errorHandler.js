@@ -39,6 +39,9 @@ export function errorHandler(err, req, res, next) {
     ...(err.code && { code: err.code }),
     ...(err.field && { field: err.field }),
     ...(err.issues && { issues: err.issues }),
-    ...(env.NODE_ENV === 'development' && { details: err.stack }),
+    ...(err.limit !== undefined && { limit: err.limit }),
+    ...(err.currentUsage !== undefined && { currentUsage: err.currentUsage }),
+    ...(err.details && { details: err.details }),
+    ...(env.NODE_ENV === 'development' && { stack: err.stack }),
   });
 }

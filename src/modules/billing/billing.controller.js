@@ -21,13 +21,23 @@ export class BillingController {
 
   static async listPlans(req, res) {
     try {
-      const { status, includeArchived } = req.query;
+      const { status, includeArchived, trashed } = req.query;
       const where = {};
 
-      if (status) {
+      if (trashed === 'true') {
+        where.deletedAt = { not: null };
+      } else if (trashed === 'false') {
+        where.deletedAt = null;
+        if (status) {
+          where.status = status;
+        } else if (includeArchived !== 'true') {
+          where.status = { in: ['ACTIVE', 'INACTIVE'] };
+        }
+      } else if (status) {
         where.status = status;
       } else if (includeArchived !== 'true') {
         where.status = { in: ['ACTIVE', 'INACTIVE'] };
+        where.deletedAt = null;
       }
 
       const plans = await prisma.plan.findMany({
@@ -196,6 +206,7 @@ export class BillingController {
   static async archivePlan(req, res) {
     try {
       const { id } = req.params;
+      const mode = req.query?.mode || req.body?.mode;
 
       const plan = await prisma.plan.findUnique({
         where: { id },
@@ -208,6 +219,39 @@ export class BillingController {
 
       if (!plan) {
         return res.status(404).json({ success: false, error: 'Plan not found.' });
+      }
+
+      if (mode === 'DELETE_PERMANENTLY') {
+        if (req.admin?.role !== 'SUPER_ADMIN') {
+          return res.status(403).json({
+            success: false,
+            error: 'Only Super Administrators are authorized to permanently delete subscription plans.',
+          });
+        }
+
+        if (plan._count.subscriptions > 0) {
+          return res.status(400).json({
+            success: false,
+            error: `Cannot permanently delete plan "${plan.name}" because it is referenced by ${plan._count.subscriptions} subscription(s). Historical billing dependencies must be preserved.`,
+          });
+        }
+
+        await prisma.plan.delete({ where: { id } });
+
+        await logBillingAction({
+          adminId: req.admin?.id,
+          entityType: 'PLAN',
+          entityId: id,
+          action: 'DELETE_PERMANENTLY',
+          actor: req.admin?.email || 'ADMIN',
+          details: { planName: plan.name, note: 'Plan permanently deleted from database.' },
+        });
+
+        return res.status(200).json({
+          success: true,
+          message: `Plan "${plan.name}" has been permanently deleted.`,
+          data: { id, mode: 'DELETE_PERMANENTLY' },
+        });
       }
 
       // Check if plan is referenced by active or past subscriptions
@@ -266,6 +310,64 @@ export class BillingController {
     }
   }
 
+  static async restorePlan(req, res) {
+    try {
+      const { id } = req.params;
+
+      const plan = await prisma.plan.findUnique({
+        where: { id },
+        include: {
+          _count: { select: { subscriptions: true } },
+        },
+      });
+
+      if (!plan) {
+        return res.status(404).json({ success: false, error: 'Plan not found.' });
+      }
+
+      if (plan.deletedAt === null && plan.status !== 'ARCHIVED') {
+        return res.status(400).json({ success: false, error: `Plan "${plan.name}" is not archived or in trash.` });
+      }
+
+      if (plan.deletedAt) {
+        const daysInTrash = Math.floor((Date.now() - new Date(plan.deletedAt).getTime()) / (1000 * 3600 * 24));
+        if (daysInTrash > 30 && req.admin?.role !== 'SUPER_ADMIN') {
+          return res.status(403).json({
+            success: false,
+            error: `Cannot restore plan "${plan.name}" because the 30-day retention period has expired. Only Super Administrators can override.`,
+          });
+        }
+      }
+
+      // Restoring a plan sets deletedAt to null and status to INACTIVE (safe state without altering active subscriptions)
+      const restored = await prisma.plan.update({
+        where: { id },
+        data: {
+          deletedAt: null,
+          status: 'INACTIVE',
+        },
+      });
+
+      await logBillingAction({
+        adminId: req.admin?.id,
+        entityType: 'PLAN',
+        entityId: id,
+        action: 'RESTORE',
+        actor: req.admin?.email || 'ADMIN',
+        details: { planName: plan.name, note: 'Plan restored from trash as INACTIVE.' },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: `Plan "${plan.name}" restored successfully. Restored plans are initially Inactive so they do not immediately alter checkout availability.`,
+        data: restored,
+      });
+    } catch (error) {
+      logger.error({ error: error.message }, 'Failed to restore plan');
+      return res.status(500).json({ success: false, error: 'Failed to restore plan.' });
+    }
+  }
+
   // ==========================================
   // SUBSCRIPTIONS MANAGEMENT
   // ==========================================
@@ -275,7 +377,12 @@ export class BillingController {
       const { companyId, status, billingInterval } = req.query;
       const where = {};
 
-      if (companyId) where.companyId = companyId;
+      if (req.companyUser?.companyId) {
+        where.companyId = req.companyUser.companyId;
+      } else if (companyId) {
+        where.companyId = companyId;
+      }
+
       if (status) where.status = status;
       if (billingInterval) where.billingInterval = billingInterval;
 
@@ -292,9 +399,38 @@ export class BillingController {
         },
       });
 
+      const companyIds = [...new Set(subscriptions.map((s) => s.companyId))];
+      const [jobCounts, teamCounts] = await Promise.all([
+        prisma.job.groupBy({
+          by: ['companyId'],
+          where: {
+            companyId: { in: companyIds },
+            status: { in: ['PUBLISHED', 'PENDING_APPROVAL'] },
+            deletedAt: null,
+          },
+          _count: { id: true },
+        }),
+        prisma.companyUser.groupBy({
+          by: ['companyId'],
+          where: {
+            companyId: { in: companyIds },
+          },
+          _count: { id: true },
+        }),
+      ]);
+
+      const jobMap = Object.fromEntries(jobCounts.map((j) => [j.companyId, j._count.id]));
+      const teamMap = Object.fromEntries(teamCounts.map((t) => [t.companyId, t._count.id]));
+
+      const enriched = subscriptions.map((sub) => ({
+        ...sub,
+        jobPostingUsage: jobMap[sub.companyId] || 0,
+        teamMemberUsage: teamMap[sub.companyId] || 0,
+      }));
+
       return res.status(200).json({
         success: true,
-        data: subscriptions,
+        data: enriched,
       });
     } catch (error) {
       logger.error({ error: error.message }, 'Failed to list subscriptions');
@@ -319,6 +455,10 @@ export class BillingController {
 
       if (!subscription) {
         return res.status(404).json({ success: false, error: 'Subscription not found.' });
+      }
+
+      if (req.companyUser?.companyId && subscription.companyId !== req.companyUser.companyId) {
+        return res.status(403).json({ success: false, error: 'Access denied: Company resource isolation enforced.' });
       }
 
       const usageSnapshot = await EntitlementService.getCompanySubscriptionUsage(subscription.companyId);
@@ -735,8 +875,13 @@ export class BillingController {
       const { status, companyId, search, page = 1, limit = 20 } = req.query;
       const where = {};
 
+      if (req.companyUser?.companyId) {
+        where.companyId = req.companyUser.companyId;
+      } else if (companyId) {
+        where.companyId = companyId;
+      }
+
       if (status) where.status = status;
-      if (companyId) where.companyId = companyId;
       if (search) {
         where.OR = [
           { invoiceNumber: { contains: search, mode: 'insensitive' } },
@@ -792,6 +937,10 @@ export class BillingController {
 
       if (!invoice) {
         return res.status(404).json({ success: false, error: 'Invoice not found.' });
+      }
+
+      if (req.companyUser?.companyId && invoice.companyId !== req.companyUser.companyId) {
+        return res.status(403).json({ success: false, error: 'Access denied: Company resource isolation enforced.' });
       }
 
       return res.status(200).json({ success: true, data: invoice });
@@ -1172,6 +1321,11 @@ export class BillingController {
         }
       }
 
+      const totalSubs = totalActiveSubscriptions + cancelledCount;
+      const churnRate = totalSubs > 0
+        ? Number(((cancelledCount / totalSubs) * 100).toFixed(1))
+        : 0;
+
       const stripeStatus = stripeService.getStatus();
 
       return res.status(200).json({
@@ -1181,6 +1335,7 @@ export class BillingController {
           paymentProvider: {
             name: 'Stripe',
             status: stripeStatus.mode,
+            mode: stripeStatus.mode,
             isLive: stripeStatus.mode === 'live',
             configured: stripeStatus.configured,
             notice: !stripeStatus.configured
@@ -1191,6 +1346,7 @@ export class BillingController {
             activeSubscriptions: totalActiveSubscriptions,
             newSubscriptions: newSubscriptionsInPeriod,
             cancelledSubscriptions: cancelledCount,
+            churnRate,
             overdueInvoices: overdueCount,
             failedPayments: failedPaymentCount,
           },
@@ -1260,6 +1416,62 @@ export class BillingController {
       });
     } catch (error) {
       logger.error({ error: error.message }, 'Failed to create Stripe checkout session');
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async createPortalSession(req, res) {
+    try {
+      const { subscriptionId, companyId, returnUrl } = req.body;
+
+      if (!stripeService.isConfigured()) {
+        return res.status(503).json({
+          success: false,
+          code: 'STRIPE_NOT_CONFIGURED',
+          error: 'Stripe integration is pending configuration. Customer portal is not available.',
+        });
+      }
+
+      let customerId = null;
+
+      if (subscriptionId) {
+        const sub = await prisma.subscription.findUnique({ where: { id: subscriptionId } });
+        if (!sub) return res.status(404).json({ success: false, error: 'Subscription not found.' });
+        if (req.companyUser?.companyId && sub.companyId !== req.companyUser.companyId) {
+          return res.status(403).json({ success: false, error: 'Access denied.' });
+        }
+        customerId = sub.stripeCustomerId;
+      } else if (companyId) {
+        if (req.companyUser?.companyId && companyId !== req.companyUser.companyId) {
+          return res.status(403).json({ success: false, error: 'Access denied.' });
+        }
+        const sub = await prisma.subscription.findFirst({
+          where: { companyId, stripeCustomerId: { not: null } },
+          orderBy: { createdAt: 'desc' },
+        });
+        customerId = sub?.stripeCustomerId;
+      }
+
+      if (!customerId) {
+        return res.status(400).json({
+          success: false,
+          error: 'No Stripe customer ID associated with this subscription or company.',
+        });
+      }
+
+      const origin = req.headers.origin || 'http://localhost:5173';
+      const session = await stripeService.createCustomerPortalSession({
+        customerId,
+        returnUrl: returnUrl || `${origin}/admin/billing/subscriptions`,
+      });
+
+      return res.status(200).json({
+        success: true,
+        data: session,
+        url: session.url,
+      });
+    } catch (error) {
+      logger.error({ error: error.message }, 'Failed to create Stripe portal session');
       return res.status(500).json({ success: false, error: error.message });
     }
   }
