@@ -661,6 +661,110 @@ export class BillingController {
     }
   }
 
+  static async applyPlanQuotas(req, res) {
+    try {
+      const { id } = req.params;
+      const { confirmBelowUsage = false } = req.body || {};
+
+      const subscription = await prisma.subscription.findUnique({
+        where: { id },
+        include: { company: true, plan: true },
+      });
+
+      if (!subscription) {
+        return res.status(404).json({ success: false, error: 'Subscription not found.' });
+      }
+
+      if (!subscription.plan) {
+        return res.status(400).json({ success: false, error: 'Subscription is not associated with an existing plan.' });
+      }
+
+      const plan = subscription.plan;
+
+      // Calculate current usage for candidate access, jobs, and team members
+      const [publishedJobsCount, teamMembersCount] = await Promise.all([
+        prisma.job.count({
+          where: {
+            companyId: subscription.companyId,
+            status: { in: ['PUBLISHED', 'PENDING_APPROVAL'] },
+            deletedAt: null,
+          },
+        }),
+        prisma.companyUser.count({
+          where: {
+            companyId: subscription.companyId,
+          },
+        }),
+      ]);
+
+      const candidateUsage = subscription.candidateAccessUsage;
+      const jobUsage = publishedJobsCount;
+      const teamUsage = teamMembersCount;
+
+      const isCandidateBelow = candidateUsage > plan.candidateAccessLimit;
+      const isJobBelow = jobUsage > plan.jobPostingLimit;
+      const isTeamBelow = teamUsage > plan.teamMemberLimit;
+
+      if ((isCandidateBelow || isJobBelow || isTeamBelow) && !confirmBelowUsage) {
+        return res.status(409).json({
+          success: false,
+          code: 'CONFIRMATION_REQUIRED_BELOW_USAGE',
+          error: 'Applying current plan quotas will set limits below existing usage. Existing jobs and team members will be preserved, but new actions will be blocked until usage complies with the new limits.',
+          details: {
+            candidateAccess: { currentUsage: candidateUsage, newLimit: plan.candidateAccessLimit, exceeds: isCandidateBelow },
+            jobPosting: { currentUsage: jobUsage, newLimit: plan.jobPostingLimit, exceeds: isJobBelow },
+            teamMember: { currentUsage: teamUsage, newLimit: plan.teamMemberLimit, exceeds: isTeamBelow },
+          },
+        });
+      }
+
+      const updated = await prisma.subscription.update({
+        where: { id },
+        data: {
+          candidateAccessLimit: plan.candidateAccessLimit,
+          jobPostingLimit: plan.jobPostingLimit,
+          teamMemberLimit: plan.teamMemberLimit,
+        },
+        include: {
+          company: true,
+          plan: true,
+        },
+      });
+
+      await logBillingAction({
+        adminId: req.admin?.id,
+        entityType: 'SUBSCRIPTION',
+        entityId: id,
+        action: 'APPLY_PLAN_QUOTAS',
+        actor: req.admin?.email || 'ADMIN',
+        details: {
+          planId: plan.id,
+          planName: plan.name,
+          before: {
+            candidateAccessLimit: subscription.candidateAccessLimit,
+            jobPostingLimit: subscription.jobPostingLimit,
+            teamMemberLimit: subscription.teamMemberLimit,
+          },
+          after: {
+            candidateAccessLimit: plan.candidateAccessLimit,
+            jobPostingLimit: plan.jobPostingLimit,
+            teamMemberLimit: plan.teamMemberLimit,
+          },
+          confirmedBelowUsage: Boolean(confirmBelowUsage),
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: `Current quotas from plan "${plan.name}" applied successfully.`,
+        data: updated,
+      });
+    } catch (error) {
+      logger.error({ error: error.message }, 'Failed to apply plan quotas to subscription');
+      return res.status(500).json({ success: false, error: 'Failed to apply plan quotas to subscription.' });
+    }
+  }
+
   static async upgradeSubscription(req, res) {
     try {
       const { id } = req.params;
@@ -1006,6 +1110,13 @@ export class BillingController {
       const { id } = req.params;
       const { amount, paymentMethod, reference } = req.body;
 
+      if (paymentMethod && paymentMethod.toLowerCase() === 'stripe') {
+        return res.status(400).json({
+          success: false,
+          error: "Direct manual entry as 'stripe' is not permitted. Use the 'Pay with Stripe' checkout flow for Stripe payments, or select a manual method (e.g. manual_bank_transfer, manual_cash, manual_credit_card).",
+        });
+      }
+
       const invoice = await prisma.invoice.findUnique({
         where: { id },
         include: { payments: true },
@@ -1118,6 +1229,116 @@ export class BillingController {
       });
     } catch (error) {
       return res.status(500).json({ success: false, error: 'Failed to void invoice.' });
+    }
+  }
+
+  static async createInvoiceCheckoutSession(req, res) {
+    try {
+      const { id } = req.params;
+      const { successUrl: inputSuccessUrl, cancelUrl: inputCancelUrl } = req.body || {};
+
+      if (!stripeService.isConfigured()) {
+        return res.status(503).json({
+          success: false,
+          code: 'STRIPE_NOT_CONFIGURED',
+          error: 'Stripe payment provider is pending configuration. Online checkout is not available in unconfigured mode.',
+        });
+      }
+
+      const invoice = await prisma.invoice.findUnique({
+        where: { id },
+        include: {
+          company: true,
+          payments: {
+            where: { status: 'SUCCEEDED' },
+          },
+        },
+      });
+
+      if (!invoice) {
+        return res.status(404).json({ success: false, error: 'Invoice not found.' });
+      }
+
+      if (invoice.status === 'PAID') {
+        return res.status(400).json({ success: false, error: 'Invoice has already been marked as PAID.' });
+      }
+
+      if (invoice.status === 'VOID') {
+        return res.status(400).json({ success: false, error: 'Cannot checkout a voided invoice.' });
+      }
+
+      const totalPaid = invoice.payments.reduce((sum, p) => sum + Number(p.amount), 0);
+      const outstandingBalance = Math.round((Number(invoice.grossTotal) - totalPaid) * 100) / 100;
+
+      if (outstandingBalance <= 0) {
+        return res.status(400).json({ success: false, error: 'Invoice has no remaining outstanding balance to pay.' });
+      }
+
+      const origin = req.headers.origin || 'http://localhost:5173';
+      const successUrl =
+        inputSuccessUrl ||
+        `${origin}/admin/billing/invoices?session_id={CHECKOUT_SESSION_ID}&invoice_id=${invoice.id}&status=success`;
+      const cancelUrl = inputCancelUrl || `${origin}/admin/billing/invoices?status=cancelled`;
+
+      const session = await stripeService.createInvoiceCheckoutSession({
+        invoice,
+        company: invoice.company,
+        outstandingBalance,
+        successUrl,
+        cancelUrl,
+        idempotencyKey: `inv_sess_${invoice.id}_${Date.now()}`,
+      });
+
+      return res.status(200).json({
+        success: true,
+        data: session,
+      });
+    } catch (error) {
+      logger.error({ error: error.message }, 'Failed to create invoice Stripe checkout session');
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async confirmInvoiceCheckoutSession(req, res) {
+    try {
+      const { id } = req.params;
+      const { sessionId } = req.body;
+
+      if (!stripeService.isConfigured()) {
+        return res.status(503).json({
+          success: false,
+          code: 'STRIPE_NOT_CONFIGURED',
+          error: 'Stripe payment provider is pending configuration.',
+        });
+      }
+
+      const stripe = stripeService.getClient();
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+      if (!session) {
+        return res.status(404).json({ success: false, error: 'Stripe checkout session not found.' });
+      }
+
+      if (session.payment_status === 'paid') {
+        await stripeService._handleInvoiceCheckoutCompleted(session);
+      }
+
+      const updatedInvoice = await prisma.invoice.findUnique({
+        where: { id },
+        include: {
+          payments: true,
+          company: true,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Invoice payment status verified.',
+        data: updatedInvoice,
+      });
+    } catch (error) {
+      logger.error({ error: error.message }, 'Failed to confirm Stripe invoice checkout session');
+      return res.status(500).json({ success: false, error: error.message });
     }
   }
 

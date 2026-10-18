@@ -660,6 +660,23 @@ export class TeamService {
 
     const result = await prisma.$transaction(async (tx) => {
       if (!user) {
+        const activeSub = await tx.subscription.findFirst({
+          where: { companyId: effectiveCompanyId, status: 'ACTIVE' },
+        });
+        if (activeSub) {
+          const currentCount = await tx.companyUser.count({
+            where: { companyId: effectiveCompanyId },
+          });
+          if (currentCount >= activeSub.teamMemberLimit) {
+            const err = new Error(
+              `Team member quota exceeded for this employer (${currentCount}/${activeSub.teamMemberLimit}).`
+            );
+            err.status = 403;
+            err.code = 'QUOTA_EXCEEDED';
+            throw err;
+          }
+        }
+
         user = await tx.companyUser.create({
           data: {
             companyId: effectiveCompanyId,

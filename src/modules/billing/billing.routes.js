@@ -15,9 +15,12 @@ import {
   upgradeSubscriptionSchema,
   cancelSubscriptionSchema,
   revokeSubscriptionSchema,
+  applyPlanQuotasSchema,
   createInvoiceSchema,
   recordPaymentSchema,
   voidInvoiceSchema,
+  createInvoiceCheckoutSchema,
+  confirmInvoiceCheckoutSchema,
   createCompanySchema,
   analyticsQuerySchema,
 } from './billing.validation.js';
@@ -60,11 +63,14 @@ router.patch('/subscriptions/:id/entitlements', requireRole('ADMIN', 'SUPER_ADMI
 router.post('/subscriptions/:id/upgrade', requireRole('ADMIN', 'SUPER_ADMIN'), validate(upgradeSubscriptionSchema), BillingController.upgradeSubscription);
 router.post('/subscriptions/:id/cancel', requireRole('ADMIN', 'SUPER_ADMIN'), validate(cancelSubscriptionSchema), BillingController.cancelSubscription);
 router.post('/subscriptions/:id/revoke', requireRole('ADMIN', 'SUPER_ADMIN'), validate(revokeSubscriptionSchema), BillingController.revokeSubscription);
+router.post('/subscriptions/:id/apply-plan-quotas', requireRole('ADMIN', 'SUPER_ADMIN'), validate(applyPlanQuotasSchema), BillingController.applyPlanQuotas);
 
 // Invoices & Payments
 router.get('/invoices', BillingController.listInvoices);
 router.get('/invoices/:id', BillingController.getInvoice);
 router.post('/invoices', requireRole('ADMIN', 'SUPER_ADMIN'), validate(createInvoiceSchema), BillingController.createInvoice);
+router.post('/invoices/:id/stripe-checkout', requireRole('ADMIN', 'SUPER_ADMIN'), validate(createInvoiceCheckoutSchema), BillingController.createInvoiceCheckoutSession);
+router.post('/invoices/:id/confirm-stripe-checkout', requireRole('ADMIN', 'SUPER_ADMIN'), validate(confirmInvoiceCheckoutSchema), BillingController.confirmInvoiceCheckoutSession);
 router.post('/invoices/:id/payments', requireRole('ADMIN', 'SUPER_ADMIN'), validate(recordPaymentSchema), BillingController.recordPayment);
 router.post('/invoices/:id/void', requireRole('ADMIN', 'SUPER_ADMIN'), validate(voidInvoiceSchema), BillingController.voidInvoice);
 

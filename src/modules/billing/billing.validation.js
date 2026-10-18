@@ -130,8 +130,48 @@ export const recordPaymentSchema = {
   }),
   body: z.object({
     amount: z.coerce.number().positive('Payment amount must be greater than zero'),
-    paymentMethod: z.string().trim().min(2).max(50).default('manual_bank_transfer'),
+    paymentMethod: z
+      .string()
+      .trim()
+      .min(2)
+      .max(50)
+      .refine((val) => val.toLowerCase() !== 'stripe', {
+        message: "Direct manual entry as 'stripe' is not permitted. Use the 'Pay with Stripe' checkout flow for Stripe payments, or select a manual method.",
+      })
+      .default('manual_bank_transfer'),
     reference: z.string().trim().max(100).optional().nullable(),
+  }),
+};
+
+export const applyPlanQuotasSchema = {
+  params: z.object({
+    id: z.string().uuid('Invalid subscription ID format'),
+  }),
+  body: z
+    .object({
+      confirmBelowUsage: z.boolean().optional().default(false),
+    })
+    .optional(),
+};
+
+export const createInvoiceCheckoutSchema = {
+  params: z.object({
+    id: z.string().uuid('Invalid invoice ID format'),
+  }),
+  body: z
+    .object({
+      successUrl: z.string().url().optional(),
+      cancelUrl: z.string().url().optional(),
+    })
+    .optional(),
+};
+
+export const confirmInvoiceCheckoutSchema = {
+  params: z.object({
+    id: z.string().uuid('Invalid invoice ID format'),
+  }),
+  body: z.object({
+    sessionId: z.string().trim().min(1, 'Stripe session ID is required'),
   }),
 };
 

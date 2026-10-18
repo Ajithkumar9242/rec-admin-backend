@@ -296,6 +296,78 @@ class StripeService {
   }
 
   /**
+   * Creates a Stripe Checkout Session for an unpaid or partially paid invoice.
+   *
+   * @param {object} params
+   * @param {object} params.invoice
+   * @param {object} params.company
+   * @param {number} params.outstandingBalance
+   * @param {string} params.successUrl
+   * @param {string} params.cancelUrl
+   * @param {string} [params.idempotencyKey]
+   * @returns {Promise<{ sessionId: string, url: string }>}
+   */
+  async createInvoiceCheckoutSession({
+    invoice,
+    company,
+    outstandingBalance,
+    successUrl,
+    cancelUrl,
+    idempotencyKey = null,
+  }) {
+    const stripe = this.getClient();
+
+    if (outstandingBalance <= 0) {
+      throw new Error('Invoice has no outstanding balance to pay.');
+    }
+
+    const customerId = await this.getOrCreateCustomer({
+      companyId: invoice.companyId,
+      companyName: company?.legalName || company?.name || 'Company',
+      email: company?.billingEmail || undefined,
+      idempotencyKey: idempotencyKey ? `cust_${idempotencyKey}` : undefined,
+    });
+
+    const unitAmountCents = Math.round(Number(outstandingBalance) * 100);
+
+    const lineItem = {
+      price_data: {
+        currency: (invoice.currency || 'EUR').toLowerCase(),
+        product_data: {
+          name: `Invoice ${invoice.invoiceNumber}`,
+          description: `Payment for Invoice ${invoice.invoiceNumber}`,
+        },
+        unit_amount: unitAmountCents,
+      },
+      quantity: 1,
+    };
+
+    const sessionOptions = idempotencyKey ? { idempotencyKey } : {};
+    const session = await stripe.checkout.sessions.create(
+      {
+        customer: customerId,
+        mode: 'payment',
+        line_items: [lineItem],
+        success_url: successUrl,
+        cancel_url: cancelUrl,
+        client_reference_id: invoice.id,
+        metadata: {
+          paymentType: 'INVOICE_PAYMENT',
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.invoiceNumber,
+          companyId: invoice.companyId,
+        },
+      },
+      sessionOptions
+    );
+
+    return {
+      sessionId: session.id,
+      url: session.url,
+    };
+  }
+
+  /**
    * Verifies Stripe Webhook signature against raw request body.
    * @param {Buffer|string} rawBody
    * @param {string} signature
@@ -391,7 +463,87 @@ class StripeService {
     }
   }
 
+  async _handleInvoiceCheckoutCompleted(session) {
+    const invoiceId = session.metadata?.invoiceId || session.client_reference_id;
+    if (!invoiceId) {
+      logger.warn({ session: session.id }, 'Invoice checkout session completed without invoice ID metadata');
+      return;
+    }
+
+    const invoice = await prisma.invoice.findUnique({
+      where: { id: invoiceId },
+      include: { payments: true },
+    });
+
+    if (!invoice) {
+      logger.warn({ invoiceId, session: session.id }, 'Invoice not found for completed checkout session');
+      return;
+    }
+
+    // Check for existing payment with same stripePaymentIntentId or session
+    const stripePaymentIntentId = session.payment_intent || null;
+    if (stripePaymentIntentId) {
+      const existingPayment = invoice.payments.find(
+        (p) => p.stripePaymentIntentId && p.stripePaymentIntentId === stripePaymentIntentId
+      );
+      if (existingPayment) {
+        logger.info({ invoiceId, stripePaymentIntentId }, 'Duplicate payment detected for invoice checkout, skipping');
+        return;
+      }
+    }
+
+    const amountPaid = session.amount_total ? session.amount_total / 100 : Number(invoice.grossTotal);
+
+    await prisma.$transaction(async (tx) => {
+      const payment = await tx.payment.create({
+        data: {
+          invoiceId: invoice.id,
+          amount: amountPaid,
+          currency: (session.currency || invoice.currency).toUpperCase(),
+          status: 'SUCCEEDED',
+          paymentMethod: 'stripe_checkout',
+          stripePaymentIntentId,
+          paidAt: new Date(),
+        },
+      });
+
+      const currentTotalPaid = invoice.payments
+        .filter((p) => p.status === 'SUCCEEDED')
+        .reduce((sum, p) => sum + Number(p.amount), 0) + amountPaid;
+
+      if (currentTotalPaid >= Number(invoice.grossTotal)) {
+        await tx.invoice.update({
+          where: { id: invoice.id },
+          data: {
+            status: 'PAID',
+            paidDate: new Date(),
+            stripePaymentIntentId,
+          },
+        });
+      }
+
+      await logBillingAction({
+        entityType: 'INVOICE',
+        entityId: invoice.id,
+        action: 'STRIPE_INVOICE_PAYMENT_COMPLETED',
+        actor: 'STRIPE_WEBHOOK',
+        details: {
+          sessionId: session.id,
+          paymentId: payment.id,
+          amountPaid,
+          stripePaymentIntentId,
+          invoiceNumber: invoice.invoiceNumber,
+        },
+        tx,
+      });
+    });
+  }
+
   async _handleCheckoutSessionCompleted(session) {
+    if (session.metadata?.paymentType === 'INVOICE_PAYMENT' || session.metadata?.invoiceId) {
+      return this._handleInvoiceCheckoutCompleted(session);
+    }
+
     const { companyId, planId, subscriptionId } = session.metadata || {};
     const stripeCustomerId = session.customer;
     const stripeSubscriptionId = session.subscription || null;
