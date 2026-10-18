@@ -25,6 +25,9 @@ async function startServer() {
     server.on('error', (err) => {
       console.error('HTTP Server Error:', err);
       logger.error({ error: err.message, stack: err.stack }, 'HTTP server error occurred');
+      if (err.code === 'EADDRINUSE') {
+        process.exit(1);
+      }
     });
 
     server.on('clientError', (err, socket) => {

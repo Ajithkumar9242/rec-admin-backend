@@ -71,6 +71,38 @@ export function validateEmployerAppUrl(url, nodeEnv = process.env.NODE_ENV) {
   return url.trim().replace(/\/+$/, '');
 }
 
+// Helper function to validate candidate application base URL
+export function validateCandidateAppUrl(url, nodeEnv = process.env.NODE_ENV) {
+  if (nodeEnv !== 'production') {
+    return (url && url.trim()) ? url.trim().replace(/\/+$/, '') : 'http://localhost:5173';
+  }
+
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    throw new Error('CANDIDATE_APP_URL is strictly required in production environment.');
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    throw new Error(`CANDIDATE_APP_URL "${url}" is not a valid URL.`);
+  }
+
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`CANDIDATE_APP_URL "${url}" must use HTTP or HTTPS protocol.`);
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  const loopbacks = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+  if (loopbacks.has(hostname) || hostname.endsWith('.localhost') || hostname.endsWith('.local')) {
+    throw new Error(
+      `CANDIDATE_APP_URL cannot point to localhost, loopback, or private origin in production ("${url}"). Please configure a valid public origin.`
+    );
+  }
+
+  return url.trim().replace(/\/+$/, '');
+}
+
 export const env = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: isTest ? parseInt(process.env.TEST_PORT || '5001', 10) : parseInt(process.env.PORT || '5000', 10),
@@ -107,8 +139,15 @@ export const env = {
           origins.push(empOrigin);
         }
       }
+      const candUrl = process.env.CANDIDATE_APP_URL || process.env.CANDIDATE_PORTAL_URL;
+      if (candUrl) {
+        const candOrigin = new URL(candUrl.trim()).origin;
+        if (!origins.includes(candOrigin)) {
+          origins.push(candOrigin);
+        }
+      }
     } catch {
-      // Ignore URL parse errors here as validateEmployerAppUrl will handle validation
+      // Ignore URL parse errors here as validate URL helpers will handle validation
     }
     return origins;
   })(),
@@ -156,6 +195,18 @@ export const env = {
   ),
   EMPLOYER_ACTIVATION_PATH: process.env.EMPLOYER_ACTIVATION_PATH || '/activate',
   COMPANY_INVITATION_EXPIRES_HOURS: parseInt(process.env.COMPANY_INVITATION_EXPIRES_HOURS || '48', 10),
+
+  // Candidate Portal & Activation URLs
+  CANDIDATE_APP_URL: validateCandidateAppUrl(
+    process.env.CANDIDATE_APP_URL || process.env.CANDIDATE_PORTAL_URL,
+    process.env.NODE_ENV
+  ),
+  CANDIDATE_PORTAL_URL: validateCandidateAppUrl(
+    process.env.CANDIDATE_APP_URL || process.env.CANDIDATE_PORTAL_URL,
+    process.env.NODE_ENV
+  ),
+  CANDIDATE_ACTIVATION_PATH: process.env.CANDIDATE_ACTIVATION_PATH || '/activate',
+  CANDIDATE_INVITATION_EXPIRES_HOURS: parseInt(process.env.CANDIDATE_INVITATION_EXPIRES_HOURS || '48', 10),
 };
 
 export function buildEmployerActivationUrl(rawToken, options = {}) {
@@ -164,3 +215,32 @@ export function buildEmployerActivationUrl(rawToken, options = {}) {
   const activationPath = (options.path || env.EMPLOYER_ACTIVATION_PATH || '/activate').replace(/^\/?/, '/');
   return `${cleanBase}${activationPath}?token=${encodeURIComponent(rawToken)}`;
 }
+
+export function buildCandidateActivationUrl(rawToken, options = {}) {
+  const isProd = process.env.NODE_ENV === 'production';
+  let baseUrl = options.baseUrl || env.CANDIDATE_APP_URL || env.CANDIDATE_PORTAL_URL;
+  if (!baseUrl) {
+    if (isProd) {
+      throw new Error('CANDIDATE_APP_URL is strictly required to build candidate activation links in production.');
+    }
+    baseUrl = 'http://localhost:5173';
+  }
+  if (isProd) {
+    try {
+      const parsed = new URL(baseUrl);
+      const loopbacks = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+      if (loopbacks.has(parsed.hostname.toLowerCase()) || parsed.hostname.endsWith('.localhost') || parsed.hostname.endsWith('.local')) {
+        throw new Error(`Production candidate activation link cannot point to localhost or loopback origin ("${baseUrl}"). Please configure a valid public origin.`);
+      }
+    } catch (urlErr) {
+      if (urlErr.message.includes('Production candidate activation link')) {
+        throw urlErr;
+      }
+      throw new Error(`Invalid candidate activation base URL "${baseUrl}": ${urlErr.message}`);
+    }
+  }
+  const cleanBase = baseUrl.replace(/\/+$/, '');
+  const activationPath = (options.path || env.CANDIDATE_ACTIVATION_PATH || '/activate').replace(/^\/?/, '/');
+  return `${cleanBase}${activationPath}?token=${encodeURIComponent(rawToken)}`;
+}
+

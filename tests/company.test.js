@@ -119,19 +119,29 @@ describe('RecruiTrain Phase 2: Employer/Company Management Integration Suite', (
     adminCookie = verifyRes.headers['set-cookie'];
 
     // Seed a test industry for onboarding tests
-    const industry = await prisma.industry.create({
-      data: {
-        name: 'Test Technology Sector',
-        code: 'TECH-TEST',
-        description: 'Technology industry for automated testing',
-        status: 'ACTIVE',
-      },
-    });
+    let industry = await prisma.industry.findFirst({ where: { name: 'Test Technology Sector' } });
+    if (!industry) {
+      industry = await prisma.industry.create({
+        data: {
+          name: 'Test Technology Sector',
+          code: 'TECH-TEST',
+          description: 'Technology industry for automated testing',
+          status: 'ACTIVE',
+        },
+      });
+    }
     createdIndustryIds.push(industry.id);
 
     // Seed a test document definition
-    const docDef = await prisma.documentDefinition.create({
-      data: {
+    const docDef = await prisma.documentDefinition.upsert({
+      where: {
+        targetType_name: {
+          targetType: 'COMPANY',
+          name: 'Test Business Registration',
+        },
+      },
+      update: {},
+      create: {
         targetType: 'COMPANY',
         name: 'Test Business Registration',
         code: 'BIZ-REG-TEST',
@@ -1310,7 +1320,7 @@ describe('RecruiTrain Phase 2: Employer/Company Management Integration Suite', (
       });
       expect(inTrash.deletedAt).not.toBeNull();
 
-      // Permanently delete from trash
+      // Permanently remove from trash
       const res = await request(app)
         .delete(`/api/companies/${trashedComp.id}`)
         .query({ mode: 'DELETE_PERMANENTLY' })

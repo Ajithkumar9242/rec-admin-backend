@@ -1320,4 +1320,242 @@ describe('Phase 4: Company-to-Hiring Integration & Candidate Discovery Suite', (
       createdJobIds.push(res.body.data.id);
     });
   });
+
+  describe('Part 6: Workplace Arrangement Multi-Select & Hiring Scope Migration Audit', () => {
+    let testCompany;
+
+    beforeAll(async () => {
+      testCompany = await prisma.company.create({
+        data: {
+          name: 'Arrangements & Scope Audit Test Corp',
+          companyCode: `AUDT_${Date.now()}`,
+          status: 'ACTIVE',
+          hiringDomestic: true,
+          hiringEu: true,
+          hiringInternational: true,
+        },
+      });
+      createdCompanyIds.push(testCompany.id);
+
+      const plan = await prisma.plan.findFirst();
+      if (plan) {
+        const sub = await prisma.subscription.create({
+          data: {
+            companyId: testCompany.id,
+            planId: plan.id,
+            status: 'ACTIVE',
+            startDate: new Date(Date.now() - 24 * 3600 * 1000),
+            endDate: new Date(Date.now() + 30 * 24 * 3600 * 1000),
+            billingInterval: 'MONTHLY',
+            price: 199.0,
+            jobPostingLimit: 50,
+          },
+        });
+        createdSubIds.push(sub.id);
+      }
+    });
+
+    it('creates a job with multiple workplace arrangements [ON_SITE, HYBRID]', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: testCompany.id,
+          title: 'Senior Fullstack Engineer - On-site & Hybrid',
+          description: 'Job supporting both on-site and hybrid arrangements.',
+          workArrangements: ['ON_SITE', 'HYBRID'],
+          hiringScopes: ['DOMESTIC', 'EU'],
+          status: 'DRAFT',
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.workArrangements).toEqual(['ON_SITE', 'HYBRID']);
+      expect(res.body.data.workArrangement).toBe('ON_SITE'); // scalar fallback
+      createdJobIds.push(res.body.data.id);
+    });
+
+    it('creates a job with all three workplace arrangements [ON_SITE, HYBRID, REMOTE]', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: testCompany.id,
+          title: 'Staff Platform Engineer - Flexible Anywhere',
+          description: 'Job supporting on-site, hybrid, or full remote work.',
+          workArrangements: ['ON_SITE', 'HYBRID', 'REMOTE'],
+          hiringScopes: ['DOMESTIC'],
+          status: 'DRAFT',
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.workArrangements).toEqual(['ON_SITE', 'HYBRID', 'REMOTE']);
+      expect(['ON_SITE', 'HYBRID', 'REMOTE']).toContain(res.body.data.workArrangement);
+      createdJobIds.push(res.body.data.id);
+    });
+
+    it('updates existing job workplace arrangements and persists new selection', async () => {
+      const job = await prisma.job.create({
+        data: {
+          companyId: testCompany.id,
+          title: 'DevOps Specialist - Initial Hybrid',
+          description: 'Initial job to be updated.',
+          workArrangement: 'HYBRID',
+          workArrangements: ['HYBRID'],
+          hiringScope: 'DOMESTIC',
+          hiringScopes: ['DOMESTIC'],
+          status: 'DRAFT',
+        },
+      });
+      createdJobIds.push(job.id);
+
+      const updateRes = await request(app)
+        .put(`/api/jobs/${job.id}`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          workArrangements: ['HYBRID', 'REMOTE'],
+        });
+
+      expect(updateRes.status).toBe(200);
+      expect(updateRes.body.success).toBe(true);
+      expect(updateRes.body.data.workArrangements).toEqual(['HYBRID', 'REMOTE']);
+      expect(updateRes.body.data.workArrangement).toBe('HYBRID');
+    });
+
+    it('rejects invalid workplace arrangement values', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: testCompany.id,
+          title: 'Invalid Arrangement Job',
+          description: 'Job with invalid arrangement payload.',
+          workArrangements: ['FLOATING_DESK'],
+          status: 'DRAFT',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('backward compatibility: legacy single workArrangement payload resolves to workArrangements array', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: testCompany.id,
+          title: 'Legacy Arrangement Payload Job',
+          description: 'Sending single workArrangement string scalar.',
+          workArrangement: 'REMOTE',
+          status: 'DRAFT',
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.workArrangement).toBe('REMOTE');
+      expect(res.body.data.workArrangements).toEqual(['REMOTE']);
+      createdJobIds.push(res.body.data.id);
+    });
+
+    it('filters jobs in public discovery and admin list matching multi-value arrangements', async () => {
+      const publishedMulti = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          companyId: testCompany.id,
+          title: 'Public Lead Architect - Hybrid + Remote',
+          description: 'Public job available for hybrid or remote arrangements.',
+          workArrangements: ['HYBRID', 'REMOTE'],
+          hiringScopes: ['DOMESTIC'],
+          status: 'PUBLISHED',
+        });
+
+      expect(publishedMulti.status).toBe(201);
+      const targetJobId = publishedMulti.body.data.id;
+      createdJobIds.push(targetJobId);
+
+      // Search public discovery by workArrangement=REMOTE
+      const publicRemote = await request(app).get('/api/jobs/public?workArrangement=REMOTE');
+      expect(publicRemote.status).toBe(200);
+      const foundInRemote = publicRemote.body.items.some((j) => j.id === targetJobId);
+      expect(foundInRemote).toBe(true);
+
+      // Search admin list by workArrangement=HYBRID
+      const adminHybrid = await request(app)
+        .get('/api/jobs?workArrangement=HYBRID')
+        .set('Cookie', adminCookie);
+      expect(adminHybrid.status).toBe(200);
+      const foundInHybrid = adminHybrid.body.items.some((j) => j.id === targetJobId);
+      expect(foundInHybrid).toBe(true);
+    });
+
+    it('migration audit verification: single-scope jobs retain original scope, multi-scope retain all scopes', async () => {
+      // Create a direct legacy EU job in DB as if migrated
+      const legacyEuJob = await prisma.job.create({
+        data: {
+          companyId: testCompany.id,
+          title: 'Legacy EU Direct DB Job',
+          description: 'Simulated pre-migration job with EU hiring scope.',
+          hiringScope: 'EU',
+          hiringScopes: ['EU'],
+          workArrangement: 'ON_SITE',
+          workArrangements: ['ON_SITE'],
+          status: 'DRAFT',
+        },
+      });
+      createdJobIds.push(legacyEuJob.id);
+
+      // Create a direct legacy International job
+      const legacyIntlJob = await prisma.job.create({
+        data: {
+          companyId: testCompany.id,
+          title: 'Legacy International Direct DB Job',
+          description: 'Simulated pre-migration job with INTERNATIONAL hiring scope.',
+          hiringScope: 'INTERNATIONAL',
+          hiringScopes: ['INTERNATIONAL'],
+          workArrangement: 'REMOTE',
+          workArrangements: ['REMOTE'],
+          status: 'DRAFT',
+        },
+      });
+      createdJobIds.push(legacyIntlJob.id);
+
+      // Create a legitimate multi-scope job
+      const multiScopeJob = await prisma.job.create({
+        data: {
+          companyId: testCompany.id,
+          title: 'Legitimate Multi-Scope Job',
+          description: 'Simulated job with all 3 scopes.',
+          hiringScope: 'DOMESTIC',
+          hiringScopes: ['DOMESTIC', 'EU', 'INTERNATIONAL'],
+          workArrangement: 'HYBRID',
+          workArrangements: ['HYBRID', 'REMOTE'],
+          status: 'DRAFT',
+        },
+      });
+      createdJobIds.push(multiScopeJob.id);
+
+      // Fetch via API to verify integrity
+      const fetchEu = await request(app).get(`/api/jobs/${legacyEuJob.id}`).set('Cookie', adminCookie);
+      expect(fetchEu.status).toBe(200);
+      expect(fetchEu.body.data.hiringScope).toBe('EU');
+      expect(fetchEu.body.data.hiringScopes).toEqual(['EU']);
+
+      const fetchIntl = await request(app).get(`/api/jobs/${legacyIntlJob.id}`).set('Cookie', adminCookie);
+      expect(fetchIntl.status).toBe(200);
+      expect(fetchIntl.body.data.hiringScope).toBe('INTERNATIONAL');
+      expect(fetchIntl.body.data.hiringScopes).toEqual(['INTERNATIONAL']);
+
+      const fetchMulti = await request(app).get(`/api/jobs/${multiScopeJob.id}`).set('Cookie', adminCookie);
+      expect(fetchMulti.status).toBe(200);
+      expect(fetchMulti.body.data.hiringScopes).toEqual(['DOMESTIC', 'EU', 'INTERNATIONAL']);
+      expect(fetchMulti.body.data.workArrangements).toEqual(['HYBRID', 'REMOTE']);
+    });
+  });
 });

@@ -217,6 +217,7 @@ model Company {
   invitations           CompanyInvitation[]
   auditLogs             CompanyAuditLog[]
   jobs                  Job[]
+  candidates            Candidate[]
 
   @@index([name])
   @@index([status])
@@ -685,8 +686,9 @@ model Job {
   state              String?
   country            String             @default("DE")
   location           String?
-  workArrangement    JobWorkArrangement @default(ON_SITE)
-  employmentType     JobEmploymentType  @default(FULL_TIME)
+  workArrangement    JobWorkArrangement   @default(ON_SITE)
+  workArrangements   JobWorkArrangement[] @default([ON_SITE])
+  employmentType     JobEmploymentType    @default(FULL_TIME)
   hiringScope        JobHiringScope     @default(DOMESTIC)
   hiringScopes       JobHiringScope[]   @default([DOMESTIC])
   currency           String             @default("EUR")
@@ -711,6 +713,7 @@ model Job {
   deletedAt          DateTime?
 
   applications       JobApplication[]
+  savedBy            SavedJob[]
 
   @@index([companyId])
   @@index([status])
@@ -728,14 +731,74 @@ model Candidate {
   id                String          @id @default(uuid())
   email             String          @unique
   firstName         String
+  middleName        String?
   lastName          String
+  fullName          String?
   phone             String?
+  alternateMobile   String?
+  dateOfBirth       DateTime?
+  gender            String?
+  maritalStatus     String?
+  nationality       String?
+
+  // Address Details
+  addressLine1      String?
+  addressLine2      String?
+  city              String?
+  state             String?
+  postalCode        String?
+  country           String          @default("DE")
+
+  // Professional Background
+  profession        String?
+  employmentType    String?
+  currentJobTitle   String?
+  currentCompany    String?
+  yearsOfExperience Decimal?        @db.Decimal(4, 1)
+  noticePeriodDays  Int?
+  currentSalary     Decimal?        @db.Decimal(12, 2)
+  expectedSalary    Decimal?        @db.Decimal(12, 2)
+  preferredLocation String?
+  willingToRelocate Boolean         @default(false)
   headline          String?
   summary           String?
   currentLocation   String?
-  country           String          @default("DE")
-  city              String?
-  willingToRelocate Boolean         @default(false)
+  source            String          @default("CAREER_PORTAL")
+
+  // Work Authorization & Global Mobility
+  passportNumber        String?
+  passportExpiryDate    DateTime?
+  visaStatus            String?
+  workPermitAuthorized  Boolean         @default(false)
+
+  // Online Profiles
+  linkedinUrl       String?
+  portfolioUrl      String?
+  githubUrl         String?
+
+  // Profile Completion Score (0-100)
+  profileCompletion Int             @default(0)
+
+  // Authentication & Security Credentials
+  passwordHash             String?
+  emailVerified            Boolean         @default(false)
+  verificationTokenHash    String?
+  passwordResetTokenHash   String?
+  passwordResetExpiresAt   DateTime?
+  lastLoginAt              DateTime?
+  failedLoginAttempts      Int             @default(0)
+  lockedUntil              DateTime?
+
+  // Account Invitation & Activation
+  invitationTokenHash      String?
+  invitationExpiresAt      DateTime?
+  invitationSentAt         DateTime?
+  invitationStatus         String?         @default("NONE")
+
+  // Company Association
+  companyId                String?
+  company                  Company?        @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
   status            CandidateStatus @default(ACTIVE)
   resumeUrl         String?
   resumePublicId    String?
@@ -746,12 +809,32 @@ model Candidate {
   deletedAt         DateTime?
 
   applications      JobApplication[]
+  savedJobs         SavedJob[]
 
   @@index([email])
   @@index([status])
   @@index([country])
   @@index([city])
+  @@index([profession])
+  @@index([deletedAt])
+  @@index([companyId])
+  @@index([invitationTokenHash])
   @@map("candidates")
+}
+
+model SavedJob {
+  id          String    @id @default(uuid())
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  jobId       String
+  job         Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  savedAt     DateTime  @default(now())
+  expiresAt   DateTime?
+
+  @@unique([candidateId, jobId])
+  @@index([candidateId])
+  @@index([jobId])
+  @@map("saved_jobs")
 }
 
 model JobApplication {

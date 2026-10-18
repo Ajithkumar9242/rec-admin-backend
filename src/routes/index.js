@@ -5,6 +5,7 @@ import billingRoutes from '../modules/billing/billing.routes.js';
 import configurationRoutes from '../modules/configuration/configuration.routes.js';
 import companyRoutes from '../modules/companies/company.routes.js';
 import jobRoutes from '../modules/jobs/job.routes.js';
+import candidateRoutes from '../modules/candidates/candidate.routes.js';
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use('/billing', billingRoutes);
 router.use('/configuration', configurationRoutes);
 router.use('/companies', companyRoutes);
 router.use('/jobs', jobRoutes);
+router.use('/candidates', candidateRoutes);
 
 export default router;

@@ -17,7 +17,7 @@ function createHttpError(message, statusCode) {
 export class JobService {
   /**
    * List jobs for Admin Directory across all companies.
-   * Supports filtering by search, status, hiringScope, employmentType, workArrangement, companyId.
+   * Supports filtering by search, status, hiringScope, employmentType, workArrangement, workArrangements, companyId.
    */
   static async listAdminJobs({
     page = 1,
@@ -27,6 +27,7 @@ export class JobService {
     hiringScope,
     employmentType,
     workArrangement,
+    workArrangements,
     companyId,
     sortBy = 'createdAt',
     sortOrder = 'desc',
@@ -35,30 +36,56 @@ export class JobService {
     const skip = (page - 1) * limit;
     const isTrashed = trashed === true || trashed === 'true';
 
-    const where = {
-      deletedAt: isTrashed ? { not: null } : null,
-      ...(status ? { status } : {}),
-      ...(hiringScope
-        ? {
-            OR: [{ hiringScope }, { hiringScopes: { has: hiringScope } }],
-          }
-        : {}),
-      ...(employmentType ? { employmentType } : {}),
-      ...(workArrangement ? { workArrangement } : {}),
-      ...(companyId ? { companyId } : {}),
-      ...(search
-        ? {
-            OR: [
-              { title: { contains: search, mode: 'insensitive' } },
-              { jobCode: { contains: search, mode: 'insensitive' } },
-              { department: { contains: search, mode: 'insensitive' } },
-              { city: { contains: search, mode: 'insensitive' } },
-              { company: { name: { contains: search, mode: 'insensitive' } } },
-              { company: { companyCode: { contains: search, mode: 'insensitive' } } },
-            ],
-          }
-        : {}),
-    };
+    const arrangementFilter = workArrangements || workArrangement;
+    const arrangementList = Array.isArray(arrangementFilter)
+      ? arrangementFilter
+      : (arrangementFilter ? [arrangementFilter] : []);
+
+    const andConditions = [
+      { deletedAt: isTrashed ? { not: null } : null },
+    ];
+
+    if (status) {
+      andConditions.push({ status });
+    }
+
+    if (hiringScope) {
+      andConditions.push({
+        OR: [{ hiringScope }, { hiringScopes: { has: hiringScope } }],
+      });
+    }
+
+    if (employmentType) {
+      andConditions.push({ employmentType });
+    }
+
+    if (arrangementList.length > 0) {
+      andConditions.push({
+        OR: [
+          { workArrangement: { in: arrangementList } },
+          { workArrangements: { hasSome: arrangementList } },
+        ],
+      });
+    }
+
+    if (companyId) {
+      andConditions.push({ companyId });
+    }
+
+    if (search) {
+      andConditions.push({
+        OR: [
+          { title: { contains: search, mode: 'insensitive' } },
+          { jobCode: { contains: search, mode: 'insensitive' } },
+          { department: { contains: search, mode: 'insensitive' } },
+          { city: { contains: search, mode: 'insensitive' } },
+          { company: { name: { contains: search, mode: 'insensitive' } } },
+          { company: { companyCode: { contains: search, mode: 'insensitive' } } },
+        ],
+      });
+    }
+
+    const where = { AND: andConditions };
 
     const orderBy = {};
     if (sortBy === 'title') {
@@ -218,6 +245,26 @@ export class JobService {
       );
     }
 
+    // 2b. Resolve and Validate Job Workplace Arrangement(s)
+    let rawArrangements = jobData.workArrangements !== undefined ? jobData.workArrangements : jobData.workArrangement;
+    let arrangements = [];
+    if (Array.isArray(rawArrangements)) {
+      arrangements = [...new Set(rawArrangements.filter(Boolean))];
+    } else if (rawArrangements) {
+      arrangements = [rawArrangements];
+    } else {
+      arrangements = ['ON_SITE'];
+    }
+
+    const validArrangements = ['ON_SITE', 'HYBRID', 'REMOTE'];
+    const invalidArrangements = arrangements.filter((a) => !validArrangements.includes(a));
+    if (invalidArrangements.length > 0 || arrangements.length === 0) {
+      throw createHttpError(
+        'At least one valid workplace arrangement (ON_SITE, HYBRID, REMOTE) must be selected.',
+        400
+      );
+    }
+
     // 3. For published or pending approval jobs, enforce active company status and required publication fields
     if (['PUBLISHED', 'PENDING_APPROVAL'].includes(status)) {
       if (company.status !== 'ACTIVE') {
@@ -268,6 +315,8 @@ export class JobService {
       const job = await tx.job.create({
         data: {
           ...jobData,
+          workArrangement: arrangements[0] || 'ON_SITE',
+          workArrangements: arrangements,
           hiringScope: scopes[0] || 'DOMESTIC',
           hiringScopes: scopes,
           germanLevel: jobData.germanLevel || null,
@@ -481,6 +530,25 @@ export class JobService {
       throw createHttpError('Company is not configured for international hiring.', 400);
     }
 
+    // Verify workplace arrangements
+    let updatedArrangements = existingJob.workArrangements && existingJob.workArrangements.length > 0
+      ? existingJob.workArrangements
+      : (existingJob.workArrangement ? [existingJob.workArrangement] : ['ON_SITE']);
+
+    if (updateData.workArrangements !== undefined || updateData.workArrangement !== undefined) {
+      const rawArrangements = updateData.workArrangements !== undefined ? updateData.workArrangements : updateData.workArrangement;
+      if (Array.isArray(rawArrangements)) {
+        updatedArrangements = [...new Set(rawArrangements.filter(Boolean))];
+      } else if (rawArrangements) {
+        updatedArrangements = [rawArrangements];
+      }
+      const validArrangements = ['ON_SITE', 'HYBRID', 'REMOTE'];
+      const invalidArrangements = updatedArrangements.filter((a) => !validArrangements.includes(a));
+      if (invalidArrangements.length > 0 || updatedArrangements.length === 0) {
+        throw createHttpError('At least one valid workplace arrangement (ON_SITE, HYBRID, REMOTE) must be selected.', 400);
+      }
+    }
+
     // Verify quota if transitioning to PUBLISHED or PENDING_APPROVAL from DRAFT/CLOSED/ARCHIVED
     const isActivating =
       ['PUBLISHED', 'PENDING_APPROVAL'].includes(updateData.status) &&
@@ -524,6 +592,8 @@ export class JobService {
       where: { id },
       data: {
         ...updateData,
+        workArrangement: updatedArrangements[0] || 'ON_SITE',
+        workArrangements: updatedArrangements,
         hiringScope: updatedScopes[0] || 'DOMESTIC',
         hiringScopes: updatedScopes,
         ...(updateData.germanLevel !== undefined ? { germanLevel: updateData.germanLevel || null } : {}),
@@ -800,27 +870,41 @@ export class JobService {
   /**
    * List jobs for a specific company (employer/admin view)
    */
-  static async listCompanyJobs(companyId, { page = 1, limit = 10, status, search, hiringScope }) {
+  static async listCompanyJobs(companyId, { page = 1, limit = 10, status, search, hiringScope, workArrangement, workArrangements }) {
     const skip = (page - 1) * limit;
-    const where = {
-      companyId,
-      deletedAt: null,
-      ...(status ? { status } : {}),
-      ...(hiringScope
-        ? {
-            OR: [{ hiringScope }, { hiringScopes: { has: hiringScope } }],
-          }
-        : {}),
-      ...(search
-        ? {
-            OR: [
-              { title: { contains: search, mode: 'insensitive' } },
-              { department: { contains: search, mode: 'insensitive' } },
-              { city: { contains: search, mode: 'insensitive' } },
-            ],
-          }
-        : {}),
-    };
+    const arrangementFilter = workArrangements || workArrangement;
+    const arrangementList = Array.isArray(arrangementFilter)
+      ? arrangementFilter
+      : (arrangementFilter ? [arrangementFilter] : []);
+
+    const andConditions = [
+      { companyId },
+      { deletedAt: null },
+    ];
+    if (status) andConditions.push({ status });
+    if (hiringScope) {
+      andConditions.push({
+        OR: [{ hiringScope }, { hiringScopes: { has: hiringScope } }],
+      });
+    }
+    if (arrangementList.length > 0) {
+      andConditions.push({
+        OR: [
+          { workArrangement: { in: arrangementList } },
+          { workArrangements: { hasSome: arrangementList } },
+        ],
+      });
+    }
+    if (search) {
+      andConditions.push({
+        OR: [
+          { title: { contains: search, mode: 'insensitive' } },
+          { department: { contains: search, mode: 'insensitive' } },
+          { city: { contains: search, mode: 'insensitive' } },
+        ],
+      });
+    }
+    const where = { AND: andConditions };
 
     const [total, items] = await Promise.all([
       prisma.job.count({ where }),
@@ -859,6 +943,7 @@ export class JobService {
     country,
     city,
     workArrangement,
+    workArrangements,
     employmentType,
     hiringScope,
     search,
@@ -870,36 +955,60 @@ export class JobService {
       where: { id: 'global' },
     });
 
-    const where = {
-      status: 'PUBLISHED',
-      deletedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-      company: {
-        deletedAt: null,
-        status: 'ACTIVE',
+    const arrangementFilter = workArrangements || workArrangement;
+    const arrangementList = Array.isArray(arrangementFilter)
+      ? arrangementFilter
+      : (arrangementFilter ? [arrangementFilter] : []);
+
+    const andConditions = [
+      { status: 'PUBLISHED' },
+      { deletedAt: null },
+      { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+      {
+        company: {
+          deletedAt: null,
+          status: 'ACTIVE',
+        },
       },
-      ...(country ? { country: country.toUpperCase() } : {}),
-      ...(city ? { city: { contains: city, mode: 'insensitive' } } : {}),
-      ...(workArrangement ? { workArrangement } : {}),
-      ...(employmentType ? { employmentType } : {}),
-      ...(hiringScope
-        ? {
-            OR: [{ hiringScope }, { hiringScopes: { has: hiringScope } }],
-            ...(hiringScope === 'DOMESTIC' ? { company: { hiringDomestic: true } } : {}),
-            ...(hiringScope === 'EU' ? { company: { hiringEu: true } } : {}),
-            ...(hiringScope === 'INTERNATIONAL' ? { company: { hiringInternational: true } } : {}),
-          }
-        : {}),
-      ...(search
-        ? {
-            OR: [
-              { title: { contains: search, mode: 'insensitive' } },
-              { description: { contains: search, mode: 'insensitive' } },
-              { department: { contains: search, mode: 'insensitive' } },
-            ],
-          }
-        : {}),
-    };
+    ];
+
+    if (country) {
+      andConditions.push({ country: country.toUpperCase() });
+    }
+    if (city) {
+      andConditions.push({ city: { contains: city, mode: 'insensitive' } });
+    }
+    if (arrangementList.length > 0) {
+      andConditions.push({
+        OR: [
+          { workArrangement: { in: arrangementList } },
+          { workArrangements: { hasSome: arrangementList } },
+        ],
+      });
+    }
+    if (employmentType) {
+      andConditions.push({ employmentType });
+    }
+    if (hiringScope) {
+      const scopeCond = {
+        OR: [{ hiringScope }, { hiringScopes: { has: hiringScope } }],
+      };
+      if (hiringScope === 'DOMESTIC') scopeCond.company = { hiringDomestic: true };
+      if (hiringScope === 'EU') scopeCond.company = { hiringEu: true };
+      if (hiringScope === 'INTERNATIONAL') scopeCond.company = { hiringInternational: true };
+      andConditions.push(scopeCond);
+    }
+    if (search) {
+      andConditions.push({
+        OR: [
+          { title: { contains: search, mode: 'insensitive' } },
+          { description: { contains: search, mode: 'insensitive' } },
+          { department: { contains: search, mode: 'insensitive' } },
+        ],
+      });
+    }
+
+    const where = { AND: andConditions };
 
     const [total, rawJobs] = await Promise.all([
       prisma.job.count({ where }),
@@ -920,6 +1029,7 @@ export class JobService {
           country: true,
           city: true,
           workArrangement: true,
+          workArrangements: true,
           employmentType: true,
           hiringScope: true,
           hiringScopes: true,
@@ -962,8 +1072,14 @@ export class JobService {
         if (scope === 'INTERNATIONAL') return job.company.hiringInternational;
         return true;
       });
+      const resolvedArrangements = job.workArrangements && job.workArrangements.length > 0
+        ? job.workArrangements
+        : (job.workArrangement ? [job.workArrangement] : ['ON_SITE']);
+
       return {
         ...job,
+        workArrangements: resolvedArrangements,
+        workArrangement: resolvedArrangements[0] || job.workArrangement,
         hiringScopes: allowedScopes,
         hiringScope: allowedScopes[0] || job.hiringScope,
         company: enforceEmployerContactVisibility(job.company, platformSettings),
@@ -1013,6 +1129,7 @@ export class JobService {
         country: true,
         city: true,
         workArrangement: true,
+        workArrangements: true,
         employmentType: true,
         hiringScope: true,
         hiringScopes: true,
@@ -1057,8 +1174,14 @@ export class JobService {
       return true;
     });
 
+    const resolvedArrangements = job.workArrangements && job.workArrangements.length > 0
+      ? job.workArrangements
+      : (job.workArrangement ? [job.workArrangement] : ['ON_SITE']);
+
     return {
       ...job,
+      workArrangements: resolvedArrangements,
+      workArrangement: resolvedArrangements[0] || job.workArrangement,
       hiringScopes: allowedScopes,
       hiringScope: allowedScopes[0] || job.hiringScope,
       company: enforceEmployerContactVisibility(job.company, platformSettings),

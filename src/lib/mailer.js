@@ -185,6 +185,89 @@ export async function sendPasswordResetEmail({ to, resetUrl, recipientName }) {
 }
 
 /**
+ * Send candidate password reset email
+ */
+export async function sendCandidatePasswordResetEmail({ to, resetUrl, recipientName }) {
+  const safeName = escapeHtml(recipientName || 'Candidate');
+  const subject = 'RecruiTrain — Password Reset Request';
+  const html = `
+    ${EMAIL_HEADER}
+    <p style="font-size: 15px; line-height: 1.5;">Hello ${safeName},</p>
+    <p style="font-size: 15px; line-height: 1.5;">We received a request to reset the password for your RecruiTrain Candidate account.</p>
+    <div style="margin: 32px 0;">
+      <a href="${resetUrl}" style="background-color: #0284c7; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block;">
+        Reset Your Password
+      </a>
+    </div>
+    <p style="font-size: 13px; color: #5c7480; line-height: 1.5;">
+      This single-use link expires in 60 minutes. If you did not request a password reset, you can safely ignore this email.
+    </p>
+    ${EMAIL_FOOTER}
+  `;
+
+  return dispatchMail({ to, subject, html });
+}
+
+/**
+ * Send candidate email verification link
+ */
+export async function sendCandidateVerificationEmail({ to, verifyUrl, recipientName }) {
+  const safeName = escapeHtml(recipientName || 'Candidate');
+  const subject = 'RecruiTrain — Verify Your Email Address';
+  const html = `
+    ${EMAIL_HEADER}
+    <p style="font-size: 15px; line-height: 1.5;">Hello ${safeName},</p>
+    <p style="font-size: 15px; line-height: 1.5;">Thank you for registering on RecruiTrain. Please verify your email address to activate your candidate profile:</p>
+    <div style="margin: 32px 0;">
+      <a href="${verifyUrl}" style="background-color: #0284c7; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block;">
+        Verify Email Address
+      </a>
+    </div>
+    <p style="font-size: 13px; color: #5c7480; line-height: 1.5;">
+      If you did not create this account, please ignore this email.
+    </p>
+    ${EMAIL_FOOTER}
+  `;
+
+  return dispatchMail({ to, subject, html });
+}
+
+/**
+ * Send candidate account activation and password setup email
+ */
+export async function sendCandidateAccountActivationEmail({ to, recipientName, activationUrl, expiresHours = 48 }) {
+  const safeName = escapeHtml(recipientName || 'Candidate');
+  const subject = 'Welcome to RecruiTrain — Activate Your Candidate Account';
+  const html = `
+    ${EMAIL_HEADER}
+    <p style="font-size: 15px; line-height: 1.5;">Hello ${safeName},</p>
+    <p style="font-size: 15px; line-height: 1.5;">
+      Your profile has been created on the <strong>RecruiTrain</strong> enterprise talent portal.
+    </p>
+    <p style="font-size: 15px; line-height: 1.5;">
+      To access your candidate dashboard, review job openings, and track your applications, please activate your account and configure your secure personal password:
+    </p>
+    <div style="margin: 32px 0;">
+      <a href="${activationUrl}" style="background-color: #0284c7; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block;">
+        Activate Account &amp; Set Password
+      </a>
+    </div>
+    <div style="background-color: #f0f9ff; border-left: 4px solid #0284c7; padding: 12px 16px; margin: 20px 0;">
+      <p style="margin: 0; font-size: 14px; color: #0369a1;">
+        <strong>Password Security Requirement:</strong><br />
+        You must choose and set your own confidential password. Platform administrators will never assign you a temporary shared password or request your credentials.
+      </p>
+    </div>
+    <p style="font-size: 13px; color: #5c7480; line-height: 1.5;">
+      This single-use activation link is valid for <strong>${expiresHours} hours</strong>. If your activation link expires before you set up your credentials, please contact your recruitment administrator or request a password reset from the sign-in page.
+    </p>
+    ${EMAIL_FOOTER}
+  `;
+
+  return dispatchMail({ to, subject, html });
+}
+
+/**
  * 1. Initial Company Administrator Invitation
  */
 export async function sendCompanyAdminInvitationEmail({ to, recipientName, companyName, invitationUrl, expiresHours = 48 }) {
