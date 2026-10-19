@@ -6,6 +6,7 @@ import {
   require2FAVerified,
   requireRole,
 } from '../../middleware/auth.js';
+import { requirePermission } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import { invitationLimiter } from '../../middleware/rateLimiter.js';
 import {
@@ -60,17 +61,20 @@ router.use(require2FAVerified);
 // ----------------------------------------------------
 router.get(
   '/status-summary',
+  requirePermission('COMPANIES', 'READ'),
   CompanyController.getStatusSummary
 );
 
 router.get(
   '/integrations-status',
+  requirePermission('COMPANIES', 'READ'),
   CompanyController.getIntegrationsStatus
 );
 
 router.post(
   '/upload-signature',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'EDIT'),
   validate(directUploadSignSchema),
   CompanyController.getUploadSignature
 );
@@ -79,6 +83,7 @@ router.post(
 router.post(
   '/upload',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'EDIT'),
   upload.single('file'),
   CompanyController.uploadAsset
 );
@@ -88,6 +93,7 @@ router.post(
 // ----------------------------------------------------
 router.get(
   '/',
+  requirePermission('COMPANIES', 'READ'),
   validate(listCompaniesSchema),
   CompanyController.listCompanies
 );
@@ -95,12 +101,14 @@ router.get(
 router.post(
   '/',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'CREATE'),
   validate(createCompanySchema),
   CompanyController.createCompany
 );
 
 router.get(
   '/:id',
+  requirePermission('COMPANIES', 'READ'),
   validate(getCompanyByIdSchema),
   CompanyController.getCompanyById
 );
@@ -108,6 +116,7 @@ router.get(
 router.put(
   '/:id',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'EDIT'),
   validate(updateCompanySchema),
   CompanyController.updateCompany
 );
@@ -115,6 +124,7 @@ router.put(
 router.patch(
   '/:id',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'EDIT'),
   validate(updateCompanySchema),
   CompanyController.updateCompany
 );
@@ -122,6 +132,7 @@ router.patch(
 router.delete(
   '/:id',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'DELETE'),
   validate(deleteCompanySchema),
   CompanyController.deleteCompany
 );
@@ -129,6 +140,7 @@ router.delete(
 router.post(
   '/:id/restore',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'EDIT'),
   validate(restoreCompanySchema),
   CompanyController.restoreCompany
 );
@@ -136,6 +148,7 @@ router.post(
 router.patch(
   '/:id/status',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'EDIT'),
   validate(updateCompanyStatusSchema),
   CompanyController.updateCompanyStatus
 );
@@ -143,6 +156,7 @@ router.patch(
 router.post(
   '/:id/review',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'EDIT'),
   validate(companyReviewDecisionSchema),
   CompanyController.reviewCompany
 );
@@ -153,6 +167,7 @@ router.post(
 router.post(
   '/:id/documents',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'CREATE'),
   validate(createCompanyDocumentSchema),
   CompanyController.addCompanyDocument
 );
@@ -160,6 +175,7 @@ router.post(
 router.post(
   '/:id/documents/upload',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'CREATE'),
   upload.single('file'),
   CompanyController.uploadAsset
 );
@@ -167,6 +183,7 @@ router.post(
 router.patch(
   '/:id/documents/:documentId/review',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'EDIT'),
   validate(reviewDocumentSchema),
   CompanyController.reviewCompanyDocument
 );
@@ -174,21 +191,25 @@ router.patch(
 router.delete(
   '/:id/documents/:documentId',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('COMPANIES', 'DELETE'),
   CompanyController.deleteCompanyDocument
 );
 
 router.get(
   '/:id/documents/:documentId/download',
+  requirePermission('COMPANIES', 'READ'),
   CompanyController.getDocumentDownloadUrl
 );
 
 router.get(
   '/:id/documents/:documentId/file',
+  requirePermission('COMPANIES', 'READ'),
   CompanyController.streamCompanyDocument
 );
 
 router.get(
   '/:id/documents/:documentId/preview',
+  requirePermission('COMPANIES', 'READ'),
   (req, res, next) => {
     req.query.disposition = 'inline';
     return CompanyController.streamCompanyDocument(req, res, next);
@@ -201,6 +222,7 @@ router.get(
 router.post(
   '/:id/invitations',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('TEAMS', 'CREATE'),
   validate(sendCompanyInvitationSchema),
   CompanyController.sendCompanyInvitation
 );
@@ -208,6 +230,7 @@ router.post(
 router.post(
   '/:id/invitations/:invitationId/resend',
   requireRole('ADMIN', 'SUPER_ADMIN'),
+  requirePermission('TEAMS', 'CREATE'),
   CompanyController.resendCompanyInvitation
 );
 

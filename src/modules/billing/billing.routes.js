@@ -5,6 +5,7 @@ import {
   require2FAVerified,
   requireRole,
 } from '../../middleware/auth.js';
+import { requirePermission } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import {
   createPlanSchema,
@@ -41,44 +42,44 @@ router.use(authenticateSession);
 router.use(require2FAVerified);
 
 // Stripe Configuration Status
-router.get('/stripe/config', BillingController.getStripeConfig);
-router.post('/stripe/checkout-session', BillingController.createCheckoutSession);
-router.post('/stripe/portal-session', BillingController.createPortalSession);
+router.get('/stripe/config', requirePermission('BILLING', 'READ'), BillingController.getStripeConfig);
+router.post('/stripe/checkout-session', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), BillingController.createCheckoutSession);
+router.post('/stripe/portal-session', requirePermission('BILLING', 'READ'), BillingController.createPortalSession);
 
 // Plans
-router.get('/plans', BillingController.listPlans);
-router.get('/plans/:id', BillingController.getPlan);
-router.post('/plans', requireRole('ADMIN', 'SUPER_ADMIN'), validate(createPlanSchema), BillingController.createPlan);
-router.patch('/plans/:id', requireRole('ADMIN', 'SUPER_ADMIN'), validate(updatePlanSchema), BillingController.updatePlan);
-router.patch('/plans/:id/status', requireRole('ADMIN', 'SUPER_ADMIN'), validate(planStatusToggleSchema), BillingController.togglePlanStatus);
-router.post('/plans/:id/restore', requireRole('ADMIN', 'SUPER_ADMIN'), BillingController.restorePlan);
-router.delete('/plans/:id', requireRole('SUPER_ADMIN'), BillingController.archivePlan);
+router.get('/plans', requirePermission('BILLING', 'READ'), BillingController.listPlans);
+router.get('/plans/:id', requirePermission('BILLING', 'READ'), BillingController.getPlan);
+router.post('/plans', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'CREATE'), validate(createPlanSchema), BillingController.createPlan);
+router.patch('/plans/:id', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(updatePlanSchema), BillingController.updatePlan);
+router.patch('/plans/:id/status', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(planStatusToggleSchema), BillingController.togglePlanStatus);
+router.post('/plans/:id/restore', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), BillingController.restorePlan);
+router.delete('/plans/:id', requireRole('SUPER_ADMIN'), requirePermission('BILLING', 'DELETE'), BillingController.archivePlan);
 
 // Subscriptions
-router.get('/subscriptions', BillingController.listSubscriptions);
-router.get('/subscriptions/:id', BillingController.getSubscription);
-router.get('/subscriptions/:id/history', BillingController.getSubscriptionHistory);
-router.post('/subscriptions', requireRole('ADMIN', 'SUPER_ADMIN'), validate(createSubscriptionSchema), BillingController.createSubscription);
-router.patch('/subscriptions/:id/entitlements', requireRole('ADMIN', 'SUPER_ADMIN'), validate(updateEntitlementsSchema), BillingController.updateEntitlements);
-router.post('/subscriptions/:id/upgrade', requireRole('ADMIN', 'SUPER_ADMIN'), validate(upgradeSubscriptionSchema), BillingController.upgradeSubscription);
-router.post('/subscriptions/:id/cancel', requireRole('ADMIN', 'SUPER_ADMIN'), validate(cancelSubscriptionSchema), BillingController.cancelSubscription);
-router.post('/subscriptions/:id/revoke', requireRole('ADMIN', 'SUPER_ADMIN'), validate(revokeSubscriptionSchema), BillingController.revokeSubscription);
-router.post('/subscriptions/:id/apply-plan-quotas', requireRole('ADMIN', 'SUPER_ADMIN'), validate(applyPlanQuotasSchema), BillingController.applyPlanQuotas);
+router.get('/subscriptions', requirePermission('BILLING', 'READ'), BillingController.listSubscriptions);
+router.get('/subscriptions/:id', requirePermission('BILLING', 'READ'), BillingController.getSubscription);
+router.get('/subscriptions/:id/history', requirePermission('BILLING', 'READ'), BillingController.getSubscriptionHistory);
+router.post('/subscriptions', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'CREATE'), validate(createSubscriptionSchema), BillingController.createSubscription);
+router.patch('/subscriptions/:id/entitlements', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(updateEntitlementsSchema), BillingController.updateEntitlements);
+router.post('/subscriptions/:id/upgrade', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(upgradeSubscriptionSchema), BillingController.upgradeSubscription);
+router.post('/subscriptions/:id/cancel', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(cancelSubscriptionSchema), BillingController.cancelSubscription);
+router.post('/subscriptions/:id/revoke', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(revokeSubscriptionSchema), BillingController.revokeSubscription);
+router.post('/subscriptions/:id/apply-plan-quotas', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(applyPlanQuotasSchema), BillingController.applyPlanQuotas);
 
 // Invoices & Payments
-router.get('/invoices', BillingController.listInvoices);
-router.get('/invoices/:id', BillingController.getInvoice);
-router.post('/invoices', requireRole('ADMIN', 'SUPER_ADMIN'), validate(createInvoiceSchema), BillingController.createInvoice);
-router.post('/invoices/:id/stripe-checkout', requireRole('ADMIN', 'SUPER_ADMIN'), validate(createInvoiceCheckoutSchema), BillingController.createInvoiceCheckoutSession);
-router.post('/invoices/:id/confirm-stripe-checkout', requireRole('ADMIN', 'SUPER_ADMIN'), validate(confirmInvoiceCheckoutSchema), BillingController.confirmInvoiceCheckoutSession);
-router.post('/invoices/:id/payments', requireRole('ADMIN', 'SUPER_ADMIN'), validate(recordPaymentSchema), BillingController.recordPayment);
-router.post('/invoices/:id/void', requireRole('ADMIN', 'SUPER_ADMIN'), validate(voidInvoiceSchema), BillingController.voidInvoice);
+router.get('/invoices', requirePermission('BILLING', 'READ'), BillingController.listInvoices);
+router.get('/invoices/:id', requirePermission('BILLING', 'READ'), BillingController.getInvoice);
+router.post('/invoices', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'CREATE'), validate(createInvoiceSchema), BillingController.createInvoice);
+router.post('/invoices/:id/stripe-checkout', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(createInvoiceCheckoutSchema), BillingController.createInvoiceCheckoutSession);
+router.post('/invoices/:id/confirm-stripe-checkout', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(confirmInvoiceCheckoutSchema), BillingController.confirmInvoiceCheckoutSession);
+router.post('/invoices/:id/payments', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(recordPaymentSchema), BillingController.recordPayment);
+router.post('/invoices/:id/void', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('BILLING', 'EDIT'), validate(voidInvoiceSchema), BillingController.voidInvoice);
 
 // Canonical Companies / Employers Search
-router.get('/companies', BillingController.listCompanies);
-router.post('/companies', requireRole('ADMIN', 'SUPER_ADMIN'), validate(createCompanySchema), BillingController.createCompany);
+router.get('/companies', requirePermission('COMPANIES', 'READ'), BillingController.listCompanies);
+router.post('/companies', requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission('COMPANIES', 'CREATE'), validate(createCompanySchema), BillingController.createCompany);
 
 // Analytics & Reports
-router.get('/analytics', validate(analyticsQuerySchema), BillingController.getAnalytics);
+router.get('/analytics', requirePermission('BILLING', 'READ'), validate(analyticsQuerySchema), BillingController.getAnalytics);
 
 export default router;

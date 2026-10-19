@@ -15,7 +15,7 @@ export async function getEffectivePermissions(actor) {
     };
   }
 
-  // Super Admin check
+  // Super Admin check: strictly reserved for SUPER_ADMIN role
   if (actor.role === 'SUPER_ADMIN') {
     const fullPermissions = {};
     for (const mod of MODULES) {
@@ -27,61 +27,47 @@ export async function getEffectivePermissions(actor) {
     return {
       isSuperAdmin: true,
       roleCode: 'SUPER_ADMIN',
+      roleName: 'Super Admin',
       companyId: null,
       permissions: fullPermissions,
     };
   }
 
-  // 1. If actor is an Admin with role ADMIN
-  if (actor.role === 'ADMIN' && !actor.companyId) {
-    // Platform Admin has platform-wide access to all modules
-    const adminPermissions = {};
-    for (const mod of MODULES) {
-      adminPermissions[mod] = {};
-      for (const act of ACTIONS) {
-        adminPermissions[mod][act] = true;
-      }
+  let resolvedRole = null;
+  let memberCompanyId = null;
+
+  // 1. Check if actor has an explicit TeamMember role assignment
+  if (actor.id) {
+    const membership = await prisma.teamMember.findFirst({
+      where: {
+        OR: [
+          { adminId: actor.id },
+          { companyUserId: actor.id },
+        ],
+      },
+      include: {
+        role: {
+          include: { permissions: true },
+        },
+        team: {
+          select: { companyId: true },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    if (membership?.role) {
+      resolvedRole = membership.role;
+      memberCompanyId = membership.team?.companyId || null;
     }
-    return {
-      isSuperAdmin: false,
-      isPlatformAdmin: true,
-      roleCode: 'ADMIN',
-      companyId: null,
-      permissions: adminPermissions,
-    };
   }
 
-  // 2. If actor has a customRoleId attached
-  let customRole = null;
-  if (actor.customRoleId) {
-    customRole = await prisma.role.findUnique({
+  // 2. If actor has a customRoleId directly attached (e.g. on CompanyUser)
+  if (!resolvedRole && actor.customRoleId) {
+    resolvedRole = await prisma.role.findUnique({
       where: { id: actor.customRoleId },
       include: { permissions: true },
     });
-  }
-
-  if (customRole) {
-    const permissions = {};
-    for (const mod of MODULES) {
-      permissions[mod] = {};
-      for (const act of ACTIONS) {
-        permissions[mod][act] = false;
-      }
-    }
-    for (const p of customRole.permissions) {
-      if (permissions[p.module]) {
-        permissions[p.module][p.action] = p.allowed;
-      }
-    }
-
-    return {
-      isSuperAdmin: false,
-      roleId: customRole.id,
-      roleCode: customRole.code,
-      roleName: customRole.name,
-      companyId: actor.companyId || customRole.companyId || null,
-      permissions,
-    };
   }
 
   // 3. Fallback to mapped system role
@@ -92,20 +78,23 @@ export async function getEffectivePermissions(actor) {
     systemRoleCode = 'RECRUITER';
   } else if (actor.role === 'HIRING_MANAGER') {
     systemRoleCode = 'HIRING_MANAGER';
+  } else if (actor.role === 'READ_ONLY' || actor.role === 'MEMBER') {
+    systemRoleCode = 'READ_ONLY';
   }
 
-  // Load system role permissions from database or fallback definition
-  let systemRole = await prisma.role.findFirst({
-    where: { code: systemRoleCode, isSystem: true, companyId: null },
-    include: { permissions: true },
-  });
-
-  if (!systemRole) {
-    await ensureSystemRoles(prisma);
-    systemRole = await prisma.role.findFirst({
+  if (!resolvedRole) {
+    resolvedRole = await prisma.role.findFirst({
       where: { code: systemRoleCode, isSystem: true, companyId: null },
       include: { permissions: true },
     });
+
+    if (!resolvedRole) {
+      await ensureSystemRoles(prisma);
+      resolvedRole = await prisma.role.findFirst({
+        where: { code: systemRoleCode, isSystem: true, companyId: null },
+        include: { permissions: true },
+      });
+    }
   }
 
   const permissions = {};
@@ -116,14 +105,14 @@ export async function getEffectivePermissions(actor) {
     }
   }
 
-  if (systemRole && systemRole.permissions) {
-    for (const p of systemRole.permissions) {
+  if (resolvedRole?.permissions?.length) {
+    for (const p of resolvedRole.permissions) {
       if (permissions[p.module]) {
         permissions[p.module][p.action] = p.allowed;
       }
     }
   } else {
-    const fallback = SYSTEM_ROLE_DEFINITIONS[systemRoleCode]?.permissions || {};
+    const fallback = SYSTEM_ROLE_DEFINITIONS[resolvedRole?.code || systemRoleCode]?.permissions || {};
     for (const mod of MODULES) {
       for (const act of ACTIONS) {
         permissions[mod][act] = Boolean(fallback[mod]?.[act]);
@@ -133,9 +122,10 @@ export async function getEffectivePermissions(actor) {
 
   return {
     isSuperAdmin: false,
-    roleId: systemRole?.id || null,
-    roleCode: systemRoleCode,
-    companyId: actor.companyId || null,
+    roleId: resolvedRole?.id || null,
+    roleCode: resolvedRole?.code || systemRoleCode,
+    roleName: resolvedRole?.name || resolvedRole?.code || systemRoleCode,
+    companyId: actor.companyId || memberCompanyId || resolvedRole?.companyId || null,
     permissions,
   };
 }
@@ -165,11 +155,6 @@ export function requirePermission(module, action) {
       const effective = await getEffectivePermissions(actor);
       req.permissions = effective;
 
-      // Platform admin bypass
-      if (effective.isPlatformAdmin) {
-        return next();
-      }
-
       // Check module and action
       const hasPermission = Boolean(effective.permissions?.[module]?.[action]);
       if (!hasPermission) {
@@ -193,8 +178,10 @@ export function requirePermission(module, action) {
       // Check company isolation if actor has a company association
       const actorCompanyId = actor.companyId || effective.companyId;
       if (actorCompanyId) {
+        const isCompanyRoute = req.baseUrl?.includes('companies');
         const targetCompanyId =
           req.params.companyId ||
+          (isCompanyRoute && req.params.id ? req.params.id : null) ||
           req.body?.companyId ||
           req.query?.companyId;
 

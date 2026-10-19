@@ -890,13 +890,16 @@ export class TeamService {
     const isSuperAdmin = actor?.role === 'SUPER_ADMIN';
     const effectiveCompanyId = !isSuperAdmin && actor?.companyId ? actor.companyId : companyId;
 
-    const where = {
-      OR: [
-        { isSystem: true },
-        ...(effectiveCompanyId ? [{ companyId: effectiveCompanyId }] : []),
-        ...(isSuperAdmin && !effectiveCompanyId ? [{ companyId: { not: null } }] : []),
-      ],
-    };
+    const where = effectiveCompanyId
+      ? {
+          OR: [
+            { isSystem: true },
+            { companyId: effectiveCompanyId },
+          ],
+        }
+      : isSuperAdmin
+      ? {}
+      : { isSystem: true };
 
     const roles = await prisma.role.findMany({
       where,

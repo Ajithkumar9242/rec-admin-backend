@@ -17,6 +17,7 @@ import {
 } from './candidate.validation.js';
 import { authenticateCandidate } from './candidateAuth.middleware.js';
 import { authenticateSession, require2FAVerified } from '../../middleware/auth.js';
+import { requirePermission } from '../../middleware/rbac.js';
 import { invitationLimiter } from '../../middleware/rateLimiter.js';
 
 const upload = multer({
@@ -82,52 +83,52 @@ router.delete('/me/saved-jobs/:jobId', authenticateCandidate, validate(jobIdPara
 router.get('/me/applications', authenticateCandidate, CandidateController.getMyApplications);
 
 // ====================================================
-// 3. Admin Candidate Management (Session + 2FA Verified)
+// 3. Admin Candidate Management (Session + 2FA Verified + RBAC)
 // ====================================================
 const adminAuth = [authenticateSession, require2FAVerified];
 
 // Candidate Directory (available on /admin and /)
-router.get('/admin', ...adminAuth, validate(listCandidatesSchema), CandidateController.listCandidates);
-router.get('/', ...adminAuth, validate(listCandidatesSchema), CandidateController.listCandidates);
+router.get('/admin', ...adminAuth, requirePermission('CANDIDATES', 'READ'), validate(listCandidatesSchema), CandidateController.listCandidates);
+router.get('/', ...adminAuth, requirePermission('CANDIDATES', 'READ'), validate(listCandidatesSchema), CandidateController.listCandidates);
 
 // Create Candidate by Admin (requires valid resume file upload)
-router.post('/admin', ...adminAuth, upload.single('resume'), validate(adminCreateCandidateSchema), CandidateController.createCandidate);
-router.post('/', ...adminAuth, upload.single('resume'), validate(adminCreateCandidateSchema), CandidateController.createCandidate);
+router.post('/admin', ...adminAuth, requirePermission('CANDIDATES', 'CREATE'), upload.single('resume'), validate(adminCreateCandidateSchema), CandidateController.createCandidate);
+router.post('/', ...adminAuth, requirePermission('CANDIDATES', 'CREATE'), upload.single('resume'), validate(adminCreateCandidateSchema), CandidateController.createCandidate);
 
 // Automatic Resume Parsing from uploaded document
-router.post('/admin/parse-resume', ...adminAuth, upload.single('resume'), CandidateController.parseResume);
-router.post('/parse-resume', ...adminAuth, upload.single('resume'), CandidateController.parseResume);
+router.post('/admin/parse-resume', ...adminAuth, requirePermission('CANDIDATES', 'CREATE'), upload.single('resume'), CandidateController.parseResume);
+router.post('/parse-resume', ...adminAuth, requirePermission('CANDIDATES', 'CREATE'), upload.single('resume'), CandidateController.parseResume);
 
 // Stream Resume Document (Inline Preview & Attachment Download)
-router.get('/admin/:id/resume', ...adminAuth, validate(candidateIdParamSchema), CandidateController.getResume);
-router.get('/:id/resume', ...adminAuth, validate(candidateIdParamSchema), CandidateController.getResume);
+router.get('/admin/:id/resume', ...adminAuth, requirePermission('CANDIDATES', 'READ'), validate(candidateIdParamSchema), CandidateController.getResume);
+router.get('/:id/resume', ...adminAuth, requirePermission('CANDIDATES', 'READ'), validate(candidateIdParamSchema), CandidateController.getResume);
 
 // Candidate 360° Profile Details
-router.get('/admin/:id', ...adminAuth, validate(candidateIdParamSchema), CandidateController.getCandidateById);
-router.get('/:id', ...adminAuth, validate(candidateIdParamSchema), CandidateController.getCandidateById);
+router.get('/admin/:id', ...adminAuth, requirePermission('CANDIDATES', 'READ'), validate(candidateIdParamSchema), CandidateController.getCandidateById);
+router.get('/:id', ...adminAuth, requirePermission('CANDIDATES', 'READ'), validate(candidateIdParamSchema), CandidateController.getCandidateById);
 
 // Update Candidate Profile by Admin
-router.put('/admin/:id', ...adminAuth, validate(candidateIdParamSchema), validate(updateCandidateProfileSchema), CandidateController.updateCandidate);
-router.put('/:id', ...adminAuth, validate(candidateIdParamSchema), validate(updateCandidateProfileSchema), CandidateController.updateCandidate);
+router.put('/admin/:id', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(candidateIdParamSchema), validate(updateCandidateProfileSchema), CandidateController.updateCandidate);
+router.put('/:id', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(candidateIdParamSchema), validate(updateCandidateProfileSchema), CandidateController.updateCandidate);
 
 // Update Candidate Status
-router.patch('/admin/:id/status', ...adminAuth, validate(adminUpdateCandidateStatusSchema), CandidateController.updateCandidateStatus);
-router.patch('/:id/status', ...adminAuth, validate(adminUpdateCandidateStatusSchema), CandidateController.updateCandidateStatus);
+router.patch('/admin/:id/status', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(adminUpdateCandidateStatusSchema), CandidateController.updateCandidateStatus);
+router.patch('/:id/status', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(adminUpdateCandidateStatusSchema), CandidateController.updateCandidateStatus);
 
 // Resend Invitation Email to Candidate
-router.post('/admin/:id/resend-invitation', ...adminAuth, validate(candidateIdParamSchema), CandidateController.resendInvitation);
-router.post('/:id/resend-invitation', ...adminAuth, validate(candidateIdParamSchema), CandidateController.resendInvitation);
+router.post('/admin/:id/resend-invitation', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(candidateIdParamSchema), CandidateController.resendInvitation);
+router.post('/:id/resend-invitation', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(candidateIdParamSchema), CandidateController.resendInvitation);
 
 // Upload Resume Document for Candidate by Admin
-router.post('/admin/:id/resume', ...adminAuth, validate(candidateIdParamSchema), upload.single('resume'), CandidateController.uploadResumeByAdmin);
-router.post('/:id/resume', ...adminAuth, validate(candidateIdParamSchema), upload.single('resume'), CandidateController.uploadResumeByAdmin);
+router.post('/admin/:id/resume', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(candidateIdParamSchema), upload.single('resume'), CandidateController.uploadResumeByAdmin);
+router.post('/:id/resume', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(candidateIdParamSchema), upload.single('resume'), CandidateController.uploadResumeByAdmin);
 
 // Soft Delete / Permanent Delete
-router.delete('/admin/:id', ...adminAuth, validate(candidateIdParamSchema), CandidateController.deleteCandidate);
-router.delete('/:id', ...adminAuth, validate(candidateIdParamSchema), CandidateController.deleteCandidate);
+router.delete('/admin/:id', ...adminAuth, requirePermission('CANDIDATES', 'DELETE'), validate(candidateIdParamSchema), CandidateController.deleteCandidate);
+router.delete('/:id', ...adminAuth, requirePermission('CANDIDATES', 'DELETE'), validate(candidateIdParamSchema), CandidateController.deleteCandidate);
 
 // Restore Candidate
-router.post('/admin/:id/restore', ...adminAuth, validate(candidateIdParamSchema), CandidateController.restoreCandidate);
-router.post('/:id/restore', ...adminAuth, validate(candidateIdParamSchema), CandidateController.restoreCandidate);
+router.post('/admin/:id/restore', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(candidateIdParamSchema), CandidateController.restoreCandidate);
+router.post('/:id/restore', ...adminAuth, requirePermission('CANDIDATES', 'EDIT'), validate(candidateIdParamSchema), CandidateController.restoreCandidate);
 
 export default router;

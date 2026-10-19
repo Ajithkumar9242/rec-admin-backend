@@ -155,13 +155,6 @@ export async function ensureSystemRoles(client = prisma) {
               },
             })
           );
-        } else if (existing.allowed !== allowed) {
-          permOps.push(
-            client.rolePermission.update({
-              where: { id: existing.id },
-              data: { allowed },
-            })
-          );
         }
       }
     }

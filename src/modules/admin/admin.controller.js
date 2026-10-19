@@ -48,48 +48,179 @@ export class AdminController {
       fromDate.setUTCHours(0, 0, 0, 0);
       toDate.setUTCHours(23, 59, 59, 999);
 
-      const [totalAdmins, activeAdmins, mfaEnrolledAdmins, totalAuditEvents, seriesRows, recentLogs] =
-        await Promise.all([
-          prisma.admin.count(),
-          prisma.admin.count({ where: { status: 'ACTIVE' } }),
-          prisma.admin.count({ where: { totpEnabled: true } }),
-          prisma.authAuditLog.count({
-            where: {
-              createdAt: {
-                gte: fromDate,
-                lte: toDate,
+      const [
+        totalAdmins,
+        activeAdmins,
+        mfaEnrolledAdmins,
+        totalAuditEvents,
+        seriesRows,
+        authLogs,
+        companyLogs,
+        billingLogs,
+        configLogs,
+      ] = await Promise.all([
+        prisma.admin.count(),
+        prisma.admin.count({ where: { status: 'ACTIVE' } }),
+        prisma.admin.count({ where: { totpEnabled: true } }),
+        prisma.authAuditLog.count({
+          where: {
+            createdAt: {
+              gte: fromDate,
+              lte: toDate,
+            },
+          },
+        }),
+        prisma.$queryRaw`
+          SELECT 
+            DATE_TRUNC(${unit}, "createdAt") AS bucket,
+            COUNT(*)::int AS count
+          FROM "auth_audit_logs"
+          WHERE "createdAt" >= ${fromDate} AND "createdAt" <= ${toDate}
+          GROUP BY bucket
+          ORDER BY bucket ASC;
+        `,
+        prisma.authAuditLog.findMany({
+          take: 15,
+          orderBy: { createdAt: 'desc' },
+          include: {
+            admin: {
+              select: {
+                id: true,
+                email: true,
+                name: true,
+                role: true,
               },
             },
-          }),
-          prisma.$queryRaw`
-            SELECT 
-              DATE_TRUNC(${unit}, "createdAt") AS bucket,
-              COUNT(*)::int AS count
-            FROM "auth_audit_logs"
-            WHERE "createdAt" >= ${fromDate} AND "createdAt" <= ${toDate}
-            GROUP BY bucket
-            ORDER BY bucket ASC;
-          `,
-          prisma.authAuditLog.findMany({
-            take: 10,
-            orderBy: { createdAt: 'desc' },
-            include: {
-              admin: {
-                select: {
-                  id: true,
-                  email: true,
-                  name: true,
-                  role: true,
-                },
+          },
+        }),
+        prisma.companyAuditLog.findMany({
+          take: 15,
+          orderBy: { createdAt: 'desc' },
+          include: {
+            admin: {
+              select: {
+                id: true,
+                email: true,
+                name: true,
+                role: true,
               },
             },
-          }),
-        ]);
+            company: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+          },
+        }),
+        prisma.billingAuditLog.findMany({
+          take: 15,
+          orderBy: { createdAt: 'desc' },
+          include: {
+            admin: {
+              select: {
+                id: true,
+                email: true,
+                name: true,
+                role: true,
+              },
+            },
+          },
+        }),
+        prisma.platformConfigAuditLog.findMany({
+          take: 15,
+          orderBy: { createdAt: 'desc' },
+          include: {
+            admin: {
+              select: {
+                id: true,
+                email: true,
+                name: true,
+                role: true,
+              },
+            },
+          },
+        }),
+      ]);
 
       const formattedSeries = (seriesRows || []).map((row) => ({
         bucket: row.bucket instanceof Date ? row.bucket.toISOString() : String(row.bucket),
         count: Number(row.count) || 0,
       }));
+
+      // Normalize activity logs into a unified platform activity stream
+      const normalizedAuth = (authLogs || []).map((log) => ({
+        id: log.id,
+        createdAt: log.createdAt,
+        category: 'SECURITY',
+        eventType: log.eventType,
+        action: log.eventType,
+        admin: log.admin,
+        actor: log.admin ? `${log.admin.name} (${log.admin.email})` : 'System',
+        resourceType: 'AUTHENTICATION',
+        resourceName: 'Admin Portal',
+        outcome: log.eventType.includes('FAIL') || log.eventType.includes('LOCKED') ? 'FAILURE' : 'SUCCESS',
+        ipAddress: log.ipAddress || null,
+        userAgent: log.userAgent || null,
+        details: log.details || null,
+      }));
+
+      const normalizedCompany = (companyLogs || []).map((log) => ({
+        id: log.id,
+        createdAt: log.createdAt,
+        category: 'COMPANY',
+        eventType: log.action,
+        action: log.action,
+        admin: log.admin,
+        actor: log.admin ? `${log.admin.name} (${log.admin.email})` : (log.actor || 'System'),
+        resourceType: 'COMPANY',
+        resourceName: log.company?.name || 'Company',
+        outcome: log.action.includes('REJECT') || log.action.includes('SUSPEND') || log.action.includes('DELETE') ? 'WARNING' : 'SUCCESS',
+        ipAddress: log.details?.ipAddress || null,
+        userAgent: null,
+        details: log.details || null,
+      }));
+
+      const normalizedBilling = (billingLogs || []).map((log) => ({
+        id: log.id,
+        createdAt: log.createdAt,
+        category: 'BILLING',
+        eventType: log.action,
+        action: log.action,
+        admin: log.admin,
+        actor: log.admin ? `${log.admin.name} (${log.admin.email})` : (log.actor || 'System'),
+        resourceType: log.entityType || 'BILLING',
+        resourceName: `${log.entityType || 'Billing'} #${log.entityId ? log.entityId.slice(0, 8) : ''}`,
+        outcome: log.action.includes('FAIL') || log.action.includes('CANCEL') ? 'WARNING' : 'SUCCESS',
+        ipAddress: log.details?.ipAddress || null,
+        userAgent: null,
+        details: log.details || null,
+      }));
+
+      const normalizedConfig = (configLogs || []).map((log) => ({
+        id: log.id,
+        createdAt: log.createdAt,
+        category: 'CONFIGURATION',
+        eventType: log.action,
+        action: log.action,
+        admin: log.admin,
+        actor: log.admin ? `${log.admin.name} (${log.admin.email})` : (log.actor || 'System'),
+        resourceType: log.entityType || 'CONFIGURATION',
+        resourceName: `${log.entityType || 'Config'} #${log.entityId ? log.entityId.slice(0, 8) : ''}`,
+        outcome: log.action.includes('DELETE') ? 'WARNING' : 'SUCCESS',
+        ipAddress: log.details?.ipAddress || null,
+        userAgent: null,
+        details: log.details || null,
+      }));
+
+      const unifiedRecentActivity = [
+        ...normalizedAuth,
+        ...normalizedCompany,
+        ...normalizedBilling,
+        ...normalizedConfig,
+      ]
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 20);
 
       return res.status(200).json({
         success: true,
@@ -181,7 +312,7 @@ export class AdminController {
           items: [],
           message: 'Notification source scheduled for Phase 3',
         },
-        recentActivity: recentLogs,
+        recentActivity: unifiedRecentActivity,
       });
     } catch (error) {
       next(error);

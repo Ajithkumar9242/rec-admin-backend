@@ -5,6 +5,7 @@ import {
   authenticateSession,
   require2FAVerified,
 } from '../../middleware/auth.js';
+import { requirePermission } from '../../middleware/rbac.js';
 import { validate } from '../../middleware/validate.js';
 import {
   createJobSchema,
@@ -76,6 +77,7 @@ router.use(require2FAVerified);
 // Admin Job Directory
 router.get(
   '/',
+  requirePermission('JOBS', 'READ'),
   validate(listAdminJobsSchema),
   JobController.listAdminJobs
 );
@@ -83,6 +85,7 @@ router.get(
 // Create Job
 router.post(
   '/',
+  requirePermission('JOBS', 'CREATE'),
   validate(createJobSchema),
   JobController.createJob
 );
@@ -90,6 +93,7 @@ router.post(
 // Upload .txt file to parse description
 router.post(
   '/parse-description-file',
+  requirePermission('JOBS', 'CREATE'),
   txtUpload.single('file'),
   JobController.parseDescriptionFile
 );
@@ -97,6 +101,7 @@ router.post(
 // List company jobs
 router.get(
   '/company/:companyId',
+  requirePermission('JOBS', 'READ'),
   validate(listCompanyJobsSchema),
   JobController.listCompanyJobs
 );
@@ -104,6 +109,7 @@ router.get(
 // Single job details
 router.get(
   '/:id',
+  requirePermission('JOBS', 'READ'),
   validate(getJobByIdSchema),
   JobController.getJobById
 );
@@ -111,6 +117,7 @@ router.get(
 // Job applicants
 router.get(
   '/:id/applicants',
+  requirePermission('APPLICATIONS', 'READ'),
   validate(getJobApplicantsSchema),
   JobController.getJobApplicants
 );
@@ -118,6 +125,7 @@ router.get(
 // Update job
 router.put(
   '/:id',
+  requirePermission('JOBS', 'EDIT'),
   validate(updateJobSchema),
   JobController.updateJob
 );
@@ -125,6 +133,7 @@ router.put(
 // Update job status (suspend, inactive, resume, etc.)
 router.patch(
   '/:id/status',
+  requirePermission('JOBS', 'EDIT'),
   validate(updateJobStatusSchema),
   JobController.updateJobStatus
 );
@@ -132,6 +141,7 @@ router.patch(
 // Delete job (move to trash or permanently delete)
 router.delete(
   '/:id',
+  requirePermission('JOBS', 'DELETE'),
   validate(deleteJobSchema),
   JobController.deleteJob
 );
@@ -139,6 +149,7 @@ router.delete(
 // Restore job from trash
 router.post(
   '/:id/restore',
+  requirePermission('JOBS', 'EDIT'),
   validate(restoreJobSchema),
   JobController.restoreJob
 );

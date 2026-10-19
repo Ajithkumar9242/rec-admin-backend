@@ -8,6 +8,7 @@ import { authenticator } from 'otplib';
 import { assertConnectedDatabase } from '../src/config/dbSafetyGuard.js';
 import { ensureSystemRoles } from '../src/modules/teams/roleBootstrap.js';
 import { TeamService } from '../src/modules/teams/team.service.js';
+import { getEffectivePermissions } from '../src/middleware/rbac.js';
 
 const TEST_ADMIN_EMAIL = 'teams_rbac_superadmin@recruitrain.test';
 const TEST_PASSWORD = 'TeamsSuperSecure123!@#';
@@ -472,6 +473,223 @@ describe('Phase 5: Teams & Permission Management (RBAC) Integration Suite', () =
       await expect(TeamService.addMember(teamA.id, { companyUserId: 'dummy', roleId: 'SUPER_ADMIN' }, recruiterActor)).rejects.toThrow(
         /Only Super Administrators can assign or create Super Admin roles/i
       );
+    });
+  });
+
+  describe('5. RBAC Enforcement, Persistence, Effective Evaluation, and Route Safeguards', () => {
+    let readOnlyAdminId;
+    let readOnlyAdminCookie;
+    let testRbacTeamId;
+    let readOnlyRoleId;
+    let recruiterRoleId;
+    let customPersistentRoleId;
+
+    beforeAll(async () => {
+      // Find READ_ONLY role and RECRUITER role
+      const readOnlyRole = await prisma.role.findFirst({
+        where: { code: 'READ_ONLY', isSystem: true },
+      });
+      readOnlyRoleId = readOnlyRole.id;
+
+      const recruiterRole = await prisma.role.findFirst({
+        where: { code: 'RECRUITER', isSystem: true },
+      });
+      recruiterRoleId = recruiterRole.id;
+
+      // Create a test team
+      const team = await prisma.team.create({
+        data: { name: 'RBAC Enforcement Test Team' },
+      });
+      testRbacTeamId = team.id;
+      cleanupTeamIds.push(team.id);
+
+      // Create a non-super-admin
+      const email = 'readonly_admin@recruitrain.test';
+      const password = 'ReadOnlySecure123!@#';
+      const passwordHash = await hashPassword(password);
+      const totpGen = generateTotpSecret(email);
+      const encryptedSecret = encryptTotpSecret(totpGen.secret);
+
+      const admin = await prisma.admin.create({
+        data: {
+          email,
+          name: 'Read Only Admin',
+          passwordHash,
+          role: 'ADMIN',
+          status: 'ACTIVE',
+          totpEnabled: true,
+          totpSecret: encryptedSecret,
+        },
+      });
+      readOnlyAdminId = admin.id;
+
+      // Assign to team with READ_ONLY role
+      await prisma.teamMember.create({
+        data: {
+          teamId: testRbacTeamId,
+          adminId: readOnlyAdminId,
+          roleId: readOnlyRoleId,
+        },
+      });
+
+      // Login & 2FA
+      const loginRes = await request(app)
+        .post('/api/auth/login')
+        .set('x-test-bypass-csrf', 'true')
+        .send({ email, password });
+
+      const code = authenticator.generate(totpGen.secret);
+      const verifyRes = await request(app)
+        .post('/api/auth/verify-2fa')
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', loginRes.headers['set-cookie'])
+        .send({ adminId: readOnlyAdminId, code });
+
+      readOnlyAdminCookie = verifyRes.headers['set-cookie'];
+    });
+
+    afterAll(async () => {
+      if (readOnlyAdminId) {
+        await prisma.teamMember.deleteMany({ where: { adminId: readOnlyAdminId } });
+        await prisma.adminBackupCode.deleteMany({ where: { adminId: readOnlyAdminId } });
+        await prisma.admin.deleteMany({ where: { id: readOnlyAdminId } });
+      }
+      if (customPersistentRoleId) {
+        await prisma.rolePermission.deleteMany({ where: { roleId: customPersistentRoleId } });
+        await prisma.role.deleteMany({ where: { id: customPersistentRoleId } });
+      }
+    });
+
+    it('calculates effective permissions reflecting team member role assignment', async () => {
+      const actor = await prisma.admin.findUnique({ where: { id: readOnlyAdminId } });
+      const effective = await getEffectivePermissions(actor);
+
+      expect(effective.isSuperAdmin).toBe(false);
+      expect(effective.roleCode).toBe('READ_ONLY');
+      expect(effective.permissions.CANDIDATES.READ).toBe(true);
+      expect(effective.permissions.CANDIDATES.CREATE).toBe(false);
+      expect(effective.permissions.JOBS.CREATE).toBe(false);
+      expect(effective.permissions.BILLING.CREATE).toBe(false);
+    });
+
+    it('rejects unauthorized direct API requests by read-only user with 403 Forbidden', async () => {
+      // 1. Direct Job Creation attempt
+      const jobRes = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          title: 'Unauthorized Software Engineer',
+          companyId: '00000000-0000-0000-0000-000000000000',
+        });
+      expect(jobRes.status).toBe(403);
+      expect(jobRes.body.error).toMatch(/You do not have 'CREATE' permission for the 'JOBS' module/i);
+
+      // 2. Direct Candidate Creation attempt
+      const candidateRes = await request(app)
+        .post('/api/candidates/admin')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          firstName: 'Unauthorized',
+          lastName: 'Candidate',
+          email: 'unauth@test.com',
+        });
+      expect(candidateRes.status).toBe(403);
+      expect(candidateRes.body.error).toMatch(/You do not have 'CREATE' permission for the 'CANDIDATES' module/i);
+
+      // 3. Direct Billing Plan Creation attempt
+      const planRes = await request(app)
+        .post('/api/billing/plans')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          name: 'Unauthorized Plan',
+          price: 99,
+          billingInterval: 'MONTHLY',
+        });
+      expect(planRes.status).toBe(403);
+      expect(planRes.body.error).toMatch(/You do not have 'CREATE' permission for the 'BILLING' module/i);
+    });
+
+    it('allows authorized read operations for read-only user', async () => {
+      const res = await request(app)
+        .get('/api/roles/me')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.roleCode).toBe('READ_ONLY');
+      expect(res.body.data.permissions.JOBS.READ).toBe(true);
+      expect(res.body.data.permissions.JOBS.CREATE).toBe(false);
+    });
+
+    it('persists permission matrix edits across ensureSystemRoles and listRoles re-seeds', async () => {
+      // Create a custom role
+      const roleRes = await request(app)
+        .post('/api/roles')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          name: 'Auditor Role Matrix Test',
+          description: 'Testing permission persistence',
+          permissions: [
+            { module: 'CANDIDATES', action: 'READ', allowed: true },
+            { module: 'CANDIDATES', action: 'CREATE', allowed: false },
+          ],
+        });
+      expect(roleRes.status).toBe(201);
+      customPersistentRoleId = roleRes.body.data.id;
+
+      // Update permission matrix: grant CANDIDATES:CREATE
+      const updateRes = await request(app)
+        .put(`/api/roles/${customPersistentRoleId}`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          permissions: [
+            { module: 'CANDIDATES', action: 'CREATE', allowed: true },
+          ],
+        });
+      expect(updateRes.status).toBe(200);
+      expect(updateRes.body.data.permissions.CANDIDATES.CREATE).toBe(true);
+
+      // Trigger listRoles which executes ensureSystemRoles(prisma)
+      const listRes = await request(app)
+        .get('/api/roles')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+      expect(listRes.status).toBe(200);
+
+      const foundRole = listRes.body.data.find((r) => r.id === customPersistentRoleId);
+      expect(foundRole).toBeDefined();
+      expect(foundRole.permissions.CANDIDATES.CREATE).toBe(true);
+    });
+
+    it('immediately updates effective permissions upon role reassignment', async () => {
+      // Reassign read-only admin's team membership to RECRUITER
+      const tm = await prisma.teamMember.findFirst({
+        where: { adminId: readOnlyAdminId, teamId: testRbacTeamId },
+      });
+      expect(tm).not.toBeNull();
+
+      await prisma.teamMember.update({
+        where: { id: tm.id },
+        data: { roleId: recruiterRoleId },
+      });
+
+      // Verify immediate reflection via /api/roles/me
+      const meRes = await request(app)
+        .get('/api/roles/me')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(meRes.status).toBe(200);
+      expect(meRes.body.data.roleCode).toBe('RECRUITER');
+      expect(meRes.body.data.permissions.CANDIDATES.CREATE).toBe(true);
+      expect(meRes.body.data.permissions.JOBS.CREATE).toBe(true);
+      expect(meRes.body.data.permissions.BILLING.READ).toBe(false);
     });
   });
 });
