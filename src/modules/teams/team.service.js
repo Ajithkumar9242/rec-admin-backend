@@ -30,9 +30,14 @@ export class TeamService {
 
     if (effectiveCompanyId) {
       where.companyId = effectiveCompanyId;
+    } else if (actor?.companyId) {
+      where.companyId = actor.companyId;
     } else if (!isSuperAdmin) {
-      // Non-super-admin without companyId cannot see unassigned teams
-      where.companyId = actor?.companyId || '__NONE__';
+      // Platform admin without company association: can see platform teams (companyId: null) and teams they belong to
+      where.OR = [
+        { companyId: null },
+        { members: { some: { adminId: actor?.id } } },
+      ];
     }
 
     if (search && search.trim()) {
@@ -451,8 +456,72 @@ export class TeamService {
     });
 
     if (!user) {
-      const err = new Error('User not found');
-      err.status = 404;
+      // Check if user is a platform Admin
+      const admin = await prisma.admin.findUnique({
+        where: { id: userId },
+      });
+
+      if (!admin) {
+        const err = new Error('User not found');
+        err.status = 404;
+        throw err;
+      }
+
+      // Only SUPER_ADMIN can modify platform admin status
+      if (!isSuperAdmin) {
+        const err = new Error('Access denied: Only Super Admins can update platform admin status');
+        err.status = 403;
+        throw err;
+      }
+
+      let adminStatus = status;
+      if (status === 'DEACTIVATED') adminStatus = 'INACTIVE';
+      if (!['ACTIVE', 'INACTIVE', 'SUSPENDED'].includes(adminStatus)) {
+        const err = new Error(`Invalid status for platform admin: ${status}`);
+        err.status = 400;
+        throw err;
+      }
+
+      const updatedAdmin = await prisma.admin.update({
+        where: { id: userId },
+        data: { status: adminStatus },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          status: true,
+          updatedAt: true,
+        },
+      });
+
+      await logConfigAction({
+        adminId: actor?.id || null,
+        entityType: 'ADMIN_USER',
+        entityId: admin.id,
+        action: `ADMIN_STATUS_${adminStatus}`,
+        actor: actor?.email || 'SYSTEM',
+        details: {
+          adminId: admin.id,
+          adminEmail: admin.email,
+          previousStatus: admin.status,
+          newStatus: adminStatus,
+        },
+      });
+
+      return {
+        id: updatedAdmin.id,
+        email: updatedAdmin.email,
+        name: updatedAdmin.name,
+        role: updatedAdmin.role,
+        status: updatedAdmin.status === 'INACTIVE' ? 'DEACTIVATED' : updatedAdmin.status,
+        updatedAt: updatedAdmin.updatedAt,
+      };
+    }
+
+    if (!isSuperAdmin && !actor?.companyId) {
+      const err = new Error('Access denied: Insufficient permissions');
+      err.status = 403;
       throw err;
     }
 
@@ -496,44 +565,113 @@ export class TeamService {
   // Member Directory & Invitations
   // ----------------------------------------------------
 
-  static async listMembers({ page = 1, limit = 20, search, companyId, role, status }, actor) {
+  static async listMembers({ page = 1, limit = 50, search, companyId, role, status }, actor) {
     const isSuperAdmin = actor?.role === 'SUPER_ADMIN';
     const effectiveCompanyId = !isSuperAdmin && actor?.companyId ? actor.companyId : companyId;
+    const includeAdmins = !effectiveCompanyId;
 
-    const where = {};
+    const cuAnd = [];
     if (effectiveCompanyId) {
-      where.companyId = effectiveCompanyId;
+      cuAnd.push({ companyId: effectiveCompanyId });
     }
 
     if (status) {
-      where.status = status;
+      cuAnd.push({ status });
     }
 
     if (role) {
-      where.OR = [
-        { role: role },
+      const cuRoleOr = [
         { customRole: { code: role } },
+        { customRole: { name: { equals: role, mode: 'insensitive' } } },
+        {
+          teamMembers: {
+            some: {
+              team: { deletedAt: null },
+              OR: [
+                { role: { code: role } },
+                { role: { name: { equals: role, mode: 'insensitive' } } },
+              ],
+            },
+          },
+        },
       ];
+      if (['OWNER', 'ADMIN', 'RECRUITER', 'MEMBER'].includes(role)) {
+        cuRoleOr.push({ role });
+      }
+      cuAnd.push({ OR: cuRoleOr });
     }
 
     if (search && search.trim()) {
       const q = search.trim();
-      where.OR = [
-        { email: { contains: q, mode: 'insensitive' } },
-        { firstName: { contains: q, mode: 'insensitive' } },
-        { lastName: { contains: q, mode: 'insensitive' } },
-      ];
+      cuAnd.push({
+        OR: [
+          { email: { contains: q, mode: 'insensitive' } },
+          { firstName: { contains: q, mode: 'insensitive' } },
+          { lastName: { contains: q, mode: 'insensitive' } },
+        ],
+      });
     }
 
-    const skip = (page - 1) * limit;
+    const cuWhere = cuAnd.length > 0 ? { AND: cuAnd } : {};
 
-    const [users, total] = await Promise.all([
+    let adminWhere = null;
+    if (includeAdmins) {
+      const adminAnd = [
+        { teamMembers: { some: { team: { deletedAt: null } } } },
+      ];
+
+      if (status) {
+        if (status === 'DEACTIVATED' || status === 'INACTIVE') {
+          adminAnd.push({ status: 'INACTIVE' });
+        } else if (status === 'ACTIVE' || status === 'SUSPENDED' || status === 'PENDING_SETUP') {
+          adminAnd.push({ status });
+        } else {
+          // Status like INVITED that does not exist for Admin
+          adminAnd.push({ id: '__NONE__' });
+        }
+      }
+
+      if (role) {
+        const adminRoleOr = [
+          {
+            teamMembers: {
+              some: {
+                team: { deletedAt: null },
+                OR: [
+                  { role: { code: role } },
+                  { role: { name: { equals: role, mode: 'insensitive' } } },
+                ],
+              },
+            },
+          },
+        ];
+        if (['SUPER_ADMIN', 'ADMIN'].includes(role)) {
+          adminRoleOr.push({ role });
+        }
+        adminAnd.push({ OR: adminRoleOr });
+      }
+
+      if (search && search.trim()) {
+        const q = search.trim();
+        adminAnd.push({
+          OR: [
+            { email: { contains: q, mode: 'insensitive' } },
+            { name: { contains: q, mode: 'insensitive' } },
+          ],
+        });
+      }
+
+      adminWhere = { AND: adminAnd };
+    }
+
+    const [users, admins] = await Promise.all([
       prisma.companyUser.findMany({
-        where,
+        where: cuWhere,
         include: {
           company: { select: { id: true, name: true, companyCode: true } },
           customRole: { select: { id: true, name: true, code: true, isSystem: true } },
           teamMembers: {
+            where: { team: { deletedAt: null } },
             include: {
               team: { select: { id: true, name: true } },
               role: { select: { id: true, name: true, code: true } },
@@ -547,33 +685,86 @@ export class TeamService {
           },
         },
         orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
       }),
-      prisma.companyUser.count({ where }),
+      includeAdmins
+        ? prisma.admin.findMany({
+            where: adminWhere,
+            include: {
+              teamMembers: {
+                where: { team: { deletedAt: null } },
+                include: {
+                  team: { select: { id: true, name: true, companyId: true } },
+                  role: { select: { id: true, name: true, code: true, isSystem: true } },
+                },
+              },
+            },
+            orderBy: { createdAt: 'desc' },
+          })
+        : Promise.resolve([]),
     ]);
 
-    return {
-      members: users.map((u) => ({
-        id: u.id,
-        email: u.email,
-        firstName: u.firstName,
-        lastName: u.lastName,
-        name: [u.firstName, u.lastName].filter(Boolean).join(' ') || u.email,
-        role: u.role,
-        customRole: u.customRole,
-        effectiveRoleName: u.customRole?.name || u.role,
-        status: u.status,
-        company: u.company,
-        teams: u.teamMembers.map((tm) => ({
+    const mappedCompanyUsers = users.map((u) => ({
+      id: u.id,
+      email: u.email,
+      firstName: u.firstName,
+      lastName: u.lastName,
+      name: [u.firstName, u.lastName].filter(Boolean).join(' ') || u.email,
+      role: u.role,
+      customRole: u.customRole,
+      effectiveRoleName: u.customRole?.name || u.customRole?.code || u.role,
+      status: u.status,
+      company: u.company,
+      teams: u.teamMembers.map((tm) => ({
+        teamId: tm.team.id,
+        teamName: tm.team.name,
+        role: tm.role?.name || tm.role?.code || u.role,
+      })),
+      pendingInvitation: u.invitations[0] || null,
+      memberType: 'COMPANY_USER',
+      createdAt: u.createdAt,
+      updatedAt: u.updatedAt,
+    }));
+
+    const mappedAdmins = admins.map((a) => {
+      const primaryRole = a.teamMembers[0]?.role;
+      const nameParts = (a.name || '').trim().split(' ');
+      const firstName = nameParts[0] || '';
+      const lastName = nameParts.slice(1).join(' ') || '';
+
+      return {
+        id: a.id,
+        email: a.email,
+        firstName,
+        lastName,
+        name: a.name || a.email,
+        role: primaryRole?.code || a.role,
+        adminRole: a.role,
+        customRole: primaryRole || null,
+        effectiveRoleName: primaryRole?.code || a.role,
+        status: a.status === 'INACTIVE' ? 'DEACTIVATED' : a.status,
+        company: null,
+        teams: a.teamMembers.map((tm) => ({
           teamId: tm.team.id,
           teamName: tm.team.name,
-          role: tm.role?.name || tm.role?.code || u.role,
+          role: tm.role?.code || tm.role?.name || a.role,
         })),
-        pendingInvitation: u.invitations[0] || null,
-        createdAt: u.createdAt,
-        updatedAt: u.updatedAt,
-      })),
+        pendingInvitation: null,
+        memberType: 'PLATFORM_ADMIN',
+        createdAt: a.createdAt,
+        updatedAt: a.updatedAt,
+      };
+    });
+
+    const allMembers = [...mappedAdmins, ...mappedCompanyUsers].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+
+    const total = allMembers.length;
+    const skip = (page - 1) * limit;
+    const pagedMembers = allMembers.slice(skip, skip + limit);
+
+    return {
+      members: pagedMembers,
       pagination: {
         page,
         limit,

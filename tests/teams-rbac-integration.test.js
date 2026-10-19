@@ -479,6 +479,7 @@ describe('Phase 5: Teams & Permission Management (RBAC) Integration Suite', () =
   describe('5. RBAC Enforcement, Persistence, Effective Evaluation, and Route Safeguards', () => {
     let readOnlyAdminId;
     let readOnlyAdminCookie;
+    let readOnlyEmail = 'readonly_admin@recruitrain.test';
     let testRbacTeamId;
     let readOnlyRoleId;
     let recruiterRoleId;
@@ -504,7 +505,7 @@ describe('Phase 5: Teams & Permission Management (RBAC) Integration Suite', () =
       cleanupTeamIds.push(team.id);
 
       // Create a non-super-admin
-      const email = 'readonly_admin@recruitrain.test';
+      const email = readOnlyEmail;
       const password = 'ReadOnlySecure123!@#';
       const passwordHash = await hashPassword(password);
       const totpGen = generateTotpSecret(email);
@@ -690,6 +691,262 @@ describe('Phase 5: Teams & Permission Management (RBAC) Integration Suite', () =
       expect(meRes.body.data.permissions.CANDIDATES.CREATE).toBe(true);
       expect(meRes.body.data.permissions.JOBS.CREATE).toBe(true);
       expect(meRes.body.data.permissions.BILLING.READ).toBe(false);
+    });
+
+    it('returns platform Admins assigned to teams in the Members Directory with correct role and team', async () => {
+      // Revert readOnlyAdmin's team role to READ_ONLY for verification
+      const tm = await prisma.teamMember.findFirst({
+        where: { adminId: readOnlyAdminId, teamId: testRbacTeamId },
+      });
+      await prisma.teamMember.update({
+        where: { id: tm.id },
+        data: { roleId: readOnlyRoleId },
+      });
+
+      // Query directory as superadmin
+      const dirRes = await request(app)
+        .get('/api/teams/members/directory')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+
+      expect(dirRes.status).toBe(200);
+      expect(dirRes.body.success).toBe(true);
+      const member = dirRes.body.members.find((m) => m.email === readOnlyEmail);
+      expect(member).toBeDefined();
+      expect(member.memberType).toBe('PLATFORM_ADMIN');
+      expect(member.role).toBe('READ_ONLY');
+      expect(member.effectiveRoleName).toBe('READ_ONLY');
+      expect(member.teams).toHaveLength(1);
+      expect(member.teams[0].teamName).toBe('RBAC Enforcement Test Team');
+      expect(member.teams[0].role).toBe('READ_ONLY');
+
+      // Test role filter
+      const filterRoleRes = await request(app)
+        .get('/api/teams/members/directory?role=READ_ONLY')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+      expect(filterRoleRes.status).toBe(200);
+      expect(filterRoleRes.body.members.some((m) => m.email === readOnlyEmail)).toBe(true);
+
+      // Test search filter
+      const searchRes = await request(app)
+        .get(`/api/teams/members/directory?search=${encodeURIComponent('readonly_admin')}`)
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+      expect(searchRes.status).toBe(200);
+      expect(searchRes.body.members.some((m) => m.email === readOnlyEmail)).toBe(true);
+
+      // Test status filter
+      const statusRes = await request(app)
+        .get('/api/teams/members/directory?status=ACTIVE')
+        .set('Cookie', adminCookie)
+        .set('x-test-bypass-csrf', 'true');
+      expect(statusRes.status).toBe(200);
+      expect(statusRes.body.members.some((m) => m.email === readOnlyEmail)).toBe(true);
+    });
+
+    it('prevents non-super admin from updating platform admin status', async () => {
+      const updateRes = await request(app)
+        .patch(`/api/teams/members/${readOnlyAdminId}/status`)
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ status: 'SUSPENDED' });
+
+      expect(updateRes.status).toBe(403);
+    });
+
+    it('blocks configuration mutations for read-only platform admin (403)', async () => {
+      // 1. Industry creation
+      const indRes = await request(app)
+        .post('/api/configuration/industries')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ name: 'Unauthorized Industry Test' });
+
+      expect(indRes.status).toBe(403);
+      expect(indRes.body.error).toMatch(/You do not have 'CREATE' permission for the 'COMPANIES' module/i);
+
+      // 2. Document definition creation
+      const docRes = await request(app)
+        .post('/api/configuration/document-definitions')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          name: 'Unauthorized Document Def',
+          type: 'COMPANY',
+          fileTypes: ['PDF'],
+          maxSizeMb: 5,
+        });
+
+      expect(docRes.status).toBe(403);
+      expect(docRes.body.error).toMatch(/You do not have 'CREATE' permission for the 'COMPANIES' module/i);
+
+      // 3. Recruitment stage creation
+      const stageRes = await request(app)
+        .post('/api/configuration/recruitment-stages')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({
+          name: 'Unauthorized Stage',
+          category: 'INTERVIEW',
+          order: 99,
+        });
+
+      expect(stageRes.status).toBe(403);
+      expect(stageRes.body.error).toMatch(/You do not have 'CREATE' permission for the 'APPLICATIONS' module/i);
+
+      // 4. Platform settings mutation
+      const setRes = await request(app)
+        .patch('/api/configuration/settings/job')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ autoApproveJobs: false });
+
+      expect(setRes.status).toBe(403);
+    });
+
+    it('allows configuration reads for read-only admin', async () => {
+      const indRes = await request(app)
+        .get('/api/configuration/industries')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true');
+      expect(indRes.status).toBe(200);
+
+      const docRes = await request(app)
+        .get('/api/configuration/document-definitions')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true');
+      expect(docRes.status).toBe(200);
+
+      const stageRes = await request(app)
+        .get('/api/configuration/recruitment-stages')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true');
+      expect(stageRes.status).toBe(200);
+    });
+
+    it('blocks core module mutations for read-only platform admin (403)', async () => {
+      // 1. Company creation
+      const compRes = await request(app)
+        .post('/api/companies')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ name: 'Unauthorized Company' });
+      expect(compRes.status).toBe(403);
+
+      // 2. Job creation
+      const jobRes = await request(app)
+        .post('/api/jobs')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ title: 'Unauthorized Job' });
+      expect(jobRes.status).toBe(403);
+
+      // 3. Team creation
+      const teamRes = await request(app)
+        .post('/api/teams')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ name: 'Unauthorized Team' });
+      expect(teamRes.status).toBe(403);
+
+      // 4. Role creation
+      const roleRes = await request(app)
+        .post('/api/roles')
+        .set('Cookie', readOnlyAdminCookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ name: 'Unauthorized Role' });
+      expect(roleRes.status).toBe(403);
+    });
+
+    it('enforces tenant isolation across company-scoped resources', async () => {
+      // 1. Create two distinct companies
+      const compA = await prisma.company.create({
+        data: { name: 'Tenant A GmbH', companyCode: `TENA-${Date.now()}` },
+      });
+      const compB = await prisma.company.create({
+        data: { name: 'Tenant B GmbH', companyCode: `TENB-${Date.now()}` },
+      });
+      cleanupCompanyIds.push(compA.id, compB.id);
+
+      // 2. Create job belonging to Tenant B
+      const jobB = await prisma.job.create({
+        data: {
+          companyId: compB.id,
+          title: 'Tenant B Confidential Role',
+          description: 'Confidential role in Tenant B',
+          status: 'DRAFT',
+        },
+      });
+
+      // 3. Create a team scoped to Tenant A with COMPANY_ADMIN role
+      const compAdminRole = await prisma.role.findFirst({
+        where: { code: 'COMPANY_ADMIN', isSystem: true },
+      });
+
+      const teamA = await prisma.team.create({
+        data: {
+          name: 'Tenant A Admin Team',
+          companyId: compA.id,
+        },
+      });
+      cleanupTeamIds.push(teamA.id);
+
+      // Create Admin assigned to Tenant A team
+      const tenantAEmail = `tenant_a_admin_${Date.now()}@tenanta.test`;
+      const pass = 'TenantSecure123!@#';
+      const pHash = await hashPassword(pass);
+      const tGen = generateTotpSecret(tenantAEmail);
+
+      const adminA = await prisma.admin.create({
+        data: {
+          email: tenantAEmail,
+          name: 'Tenant A Admin',
+          passwordHash: pHash,
+          role: 'ADMIN',
+          status: 'ACTIVE',
+          totpEnabled: true,
+          totpSecret: encryptTotpSecret(tGen.secret),
+        },
+      });
+
+      await prisma.teamMember.create({
+        data: {
+          teamId: teamA.id,
+          adminId: adminA.id,
+          roleId: compAdminRole.id,
+        },
+      });
+
+      // Login Admin A
+      const loginA = await request(app)
+        .post('/api/auth/login')
+        .set('x-test-bypass-csrf', 'true')
+        .send({ email: tenantAEmail, password: pass });
+
+      const codeA = authenticator.generate(tGen.secret);
+      const verifyA = await request(app)
+        .post('/api/auth/verify-2fa')
+        .set('x-test-bypass-csrf', 'true')
+        .set('Cookie', loginA.headers['set-cookie'])
+        .send({ adminId: adminA.id, code: codeA });
+
+      const adminACookie = verifyA.headers['set-cookie'];
+
+      // 4. Tenant A admin attempts to update Tenant B job
+      const crossJobRes = await request(app)
+        .put(`/api/jobs/${jobB.id}`)
+        .set('Cookie', adminACookie)
+        .set('x-test-bypass-csrf', 'true')
+        .send({ title: 'Tampered Job Title' });
+
+      expect(crossJobRes.status).toBe(403);
+      expect(crossJobRes.body.error).toMatch(/cross-company access prohibited|not authorized to view or manage resources of another company/i);
+
+      // Cleanup
+      await prisma.job.delete({ where: { id: jobB.id } });
+      await prisma.teamMember.deleteMany({ where: { adminId: adminA.id } });
+      await prisma.admin.delete({ where: { id: adminA.id } });
     });
   });
 });

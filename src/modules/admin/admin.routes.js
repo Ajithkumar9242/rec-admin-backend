@@ -5,6 +5,7 @@ import {
   require2FAVerified,
   requireRole,
 } from '../../middleware/auth.js';
+import { requirePermission } from '../../middleware/rbac.js';
 
 import { validate } from '../../middleware/validate.js';
 import {
@@ -21,8 +22,8 @@ router.use(authenticateSession);
 router.use(require2FAVerified);
 
 // Dashboard & Telemetry
-router.get('/dashboard', validate(dashboardQuerySchema), AdminController.getDashboard);
-router.get('/overview', AdminController.getOverview);
+router.get('/dashboard', requirePermission('DASHBOARD', 'READ'), validate(dashboardQuerySchema), AdminController.getDashboard);
+router.get('/overview', requirePermission('DASHBOARD', 'READ'), AdminController.getOverview);
 
 // Security & Audit Logs
 router.get('/audit-logs', requireRole('SUPER_ADMIN'), AdminController.getAuditLogs);

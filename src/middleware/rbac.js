@@ -40,6 +40,7 @@ export async function getEffectivePermissions(actor) {
   if (actor.id) {
     const membership = await prisma.teamMember.findFirst({
       where: {
+        team: { deletedAt: null },
         OR: [
           { adminId: actor.id },
           { companyUserId: actor.id },
@@ -70,7 +71,26 @@ export async function getEffectivePermissions(actor) {
     });
   }
 
-  // 3. Fallback to mapped system role
+  // 3. Unassigned Platform Admin fallback (unrestricted platform admin unless explicitly assigned to a restricted team role)
+  if (!resolvedRole && actor.role === 'ADMIN' && !actor.companyId) {
+    const adminPermissions = {};
+    for (const mod of MODULES) {
+      adminPermissions[mod] = {};
+      for (const act of ACTIONS) {
+        adminPermissions[mod][act] = true;
+      }
+    }
+    return {
+      isSuperAdmin: false,
+      isPlatformAdmin: true,
+      roleCode: 'ADMIN',
+      roleName: 'Platform Administrator',
+      companyId: null,
+      permissions: adminPermissions,
+    };
+  }
+
+  // 4. Fallback to mapped system role
   let systemRoleCode = 'READ_ONLY';
   if (actor.role === 'OWNER' || actor.role === 'ADMIN' || actor.role === 'COMPANY_ADMIN') {
     systemRoleCode = 'COMPANY_ADMIN';
@@ -179,11 +199,29 @@ export function requirePermission(module, action) {
       const actorCompanyId = actor.companyId || effective.companyId;
       if (actorCompanyId) {
         const isCompanyRoute = req.baseUrl?.includes('companies');
-        const targetCompanyId =
+        let targetCompanyId =
           req.params.companyId ||
           (isCompanyRoute && req.params.id ? req.params.id : null) ||
           req.body?.companyId ||
           req.query?.companyId;
+
+        // Verify tenant scope for job resources
+        if (!targetCompanyId && req.baseUrl?.includes('jobs') && req.params.id) {
+          const job = await prisma.job.findUnique({
+            where: { id: req.params.id },
+            select: { companyId: true },
+          });
+          if (job) targetCompanyId = job.companyId;
+        }
+
+        // Verify tenant scope for team resources
+        if (!targetCompanyId && req.baseUrl?.includes('teams') && req.params.id) {
+          const team = await prisma.team.findUnique({
+            where: { id: req.params.id },
+            select: { companyId: true },
+          });
+          if (team?.companyId) targetCompanyId = team.companyId;
+        }
 
         if (targetCompanyId && targetCompanyId !== actorCompanyId) {
           logger.warn(
