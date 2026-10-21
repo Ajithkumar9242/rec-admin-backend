@@ -20,8 +20,14 @@ const TEST_ADMIN_PASSWORD = 'DashboardPassword123!@#';
 describe('Dashboard Telemetry, Date Filtering & Export Suite', () => {
   let app;
   let testAdminId;
+  let testCompanyId;
   let authCookie;
   let totpSecret;
+
+  const TEST_CANDIDATE_EMAILS = [
+    'dashboard_cand1@recruitrain.test',
+    'dashboard_cand2@recruitrain.test',
+  ];
 
   beforeAll(async () => {
     await assertConnectedDatabase(prisma);
@@ -38,6 +44,64 @@ describe('Dashboard Telemetry, Date Filtering & Export Suite', () => {
       await prisma.passwordResetToken.deleteMany({ where: { adminId: existing.id } });
       await prisma.admin.delete({ where: { id: existing.id } });
     }
+
+    await prisma.candidate.deleteMany({
+      where: { email: { in: TEST_CANDIDATE_EMAILS } },
+    });
+
+    const company = await prisma.company.create({
+      data: {
+        name: 'Dashboard Analytics Test Corp',
+        status: 'ACTIVE',
+      },
+    });
+    testCompanyId = company.id;
+
+    await prisma.job.createMany({
+      data: [
+        {
+          companyId: testCompanyId,
+          title: 'Senior Full Stack Engineer',
+          description: 'Build robust enterprise apps',
+          status: 'PUBLISHED',
+          createdAt: new Date(),
+        },
+        {
+          companyId: testCompanyId,
+          title: 'Junior Product Designer',
+          description: 'Design intuitive interfaces',
+          status: 'DRAFT',
+          createdAt: new Date(),
+        },
+        {
+          companyId: testCompanyId,
+          title: 'Archived Soft-deleted Role',
+          description: 'Should be excluded from active analytics',
+          status: 'ARCHIVED',
+          deletedAt: new Date(),
+          createdAt: new Date(),
+        },
+      ],
+    });
+
+    await prisma.candidate.createMany({
+      data: [
+        {
+          email: TEST_CANDIDATE_EMAILS[0],
+          firstName: 'Alice',
+          lastName: 'Candidate',
+          status: 'ACTIVE',
+          createdAt: new Date(),
+        },
+        {
+          email: TEST_CANDIDATE_EMAILS[1],
+          firstName: 'Bob',
+          lastName: 'Applicant',
+          status: 'PENDING_APPROVAL',
+          createdAt: new Date(),
+        },
+      ],
+    });
 
     const passwordHash = await hashPassword(TEST_ADMIN_PASSWORD);
     const totpGen = generateTotpSecret(TEST_ADMIN_EMAIL);
@@ -80,6 +144,13 @@ describe('Dashboard Telemetry, Date Filtering & Export Suite', () => {
       await prisma.passwordResetToken.deleteMany({ where: { adminId: testAdminId } });
       await prisma.admin.deleteMany({ where: { id: testAdminId } });
     }
+    if (testCompanyId) {
+      await prisma.job.deleteMany({ where: { companyId: testCompanyId } });
+      await prisma.company.deleteMany({ where: { id: testCompanyId } });
+    }
+    await prisma.candidate.deleteMany({
+      where: { email: { in: TEST_CANDIDATE_EMAILS } },
+    });
   });
 
   describe('1. Authentication & Route Protection', () => {
@@ -103,7 +174,7 @@ describe('Dashboard Telemetry, Date Filtering & Export Suite', () => {
   });
 
   describe('2. Dashboard Telemetry & KPI Aggregation', () => {
-    it('returns 200 with complete KPI summaries and honest module connection status', async () => {
+    it('returns 200 with complete KPI summaries and connected job & candidate analytics', async () => {
       const res = await request(app)
         .get('/api/admin/dashboard')
         .set('Cookie', authCookie);
@@ -120,18 +191,39 @@ describe('Dashboard Telemetry, Date Filtering & Export Suite', () => {
       expect(kpis.mfaAdoption.connected).toBe(true);
       expect(kpis.totalAuditEvents.connected).toBe(true);
 
+      // Connected live jobs & candidates KPIs
+      expect(kpis.activeJobs.connected).toBe(true);
+      expect(kpis.activeJobs.count).toBeGreaterThanOrEqual(1);
+      expect(kpis.inactiveJobs.connected).toBe(true);
+      expect(kpis.inactiveJobs.count).toBeGreaterThanOrEqual(1);
+      expect(kpis.totalCandidates.connected).toBe(true);
+      expect(kpis.totalCandidates.count).toBeGreaterThanOrEqual(2);
+
       // Pending modules: verified honest not-connected states
-      expect(kpis.activeJobs.connected).toBe(false);
-      expect(kpis.activeJobs.count).toBeNull();
-      expect(kpis.inactiveJobs.connected).toBe(false);
       expect(kpis.totalCompanies.connected).toBe(false);
-      expect(kpis.totalCandidates.connected).toBe(false);
 
       // Charts
       expect(charts.auditActivity.connected).toBe(true);
       expect(Array.isArray(charts.auditActivity.series)).toBe(true);
-      expect(charts.jobPostings.connected).toBe(false);
-      expect(charts.candidateRegistrations.connected).toBe(false);
+
+      // Job Postings Chart
+      expect(charts.jobPostings.connected).toBe(true);
+      expect(Array.isArray(charts.jobPostings.series)).toBe(true);
+      expect(charts.jobPostings.series.length).toBeGreaterThanOrEqual(1);
+      expect(charts.jobPostings.total).toBeGreaterThanOrEqual(2);
+      expect(charts.jobPostings.active).toBeGreaterThanOrEqual(1);
+      expect(charts.jobPostings.counts.PUBLISHED).toBeGreaterThanOrEqual(1);
+      expect(charts.jobPostings.counts.DRAFT).toBeGreaterThanOrEqual(1);
+
+      // Candidate Registrations Chart
+      expect(charts.candidateRegistrations.connected).toBe(true);
+      expect(Array.isArray(charts.candidateRegistrations.series)).toBe(true);
+      expect(charts.candidateRegistrations.series.length).toBeGreaterThanOrEqual(1);
+      expect(charts.candidateRegistrations.total).toBeGreaterThanOrEqual(2);
+      expect(charts.candidateRegistrations.active).toBeGreaterThanOrEqual(1);
+      expect(charts.candidateRegistrations.pending).toBeGreaterThanOrEqual(1);
+
+      // Employer registrations
       expect(charts.employerRegistrations.connected).toBe(false);
 
       // Notifications
@@ -153,6 +245,8 @@ describe('Dashboard Telemetry, Date Filtering & Export Suite', () => {
       expect(res.status).toBe(200);
       expect(res.body.dateRange.groupBy).toBe('month');
       expect(res.body.charts.auditActivity.groupBy).toBe('month');
+      expect(res.body.charts.jobPostings.groupBy).toBe('month');
+      expect(res.body.charts.candidateRegistrations.groupBy).toBe('month');
     });
 
     it('accepts valid date range filter with year grouping', async () => {
@@ -167,6 +261,8 @@ describe('Dashboard Telemetry, Date Filtering & Export Suite', () => {
       expect(res.status).toBe(200);
       expect(res.body.dateRange.groupBy).toBe('year');
       expect(res.body.charts.auditActivity.groupBy).toBe('year');
+      expect(res.body.charts.jobPostings.groupBy).toBe('year');
+      expect(res.body.charts.candidateRegistrations.groupBy).toBe('year');
     });
 
     it('successfully processes exact frontend request: GET /api/admin/dashboard?from=2026-09-14&to=2026-10-14&groupBy=day', async () => {
@@ -177,9 +273,11 @@ describe('Dashboard Telemetry, Date Filtering & Export Suite', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.dateRange.groupBy).toBe('day');
-      expect(res.body.kpis.activeJobs.connected).toBe(false);
+      expect(res.body.kpis.activeJobs.connected).toBe(true);
       expect(res.body.kpis.totalCompanies.connected).toBe(false);
-      expect(res.body.kpis.totalCandidates.connected).toBe(false);
+      expect(res.body.kpis.totalCandidates.connected).toBe(true);
+      expect(res.body.charts.jobPostings.connected).toBe(true);
+      expect(res.body.charts.candidateRegistrations.connected).toBe(true);
       expect(res.body.recentNotifications.connected).toBe(false);
       expect(res.body.recentActivity).toBeInstanceOf(Array);
     });
@@ -209,6 +307,8 @@ describe('Dashboard Telemetry, Date Filtering & Export Suite', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.charts.auditActivity.series).toHaveLength(0);
+      expect(res.body.charts.jobPostings.series).toHaveLength(0);
+      expect(res.body.charts.candidateRegistrations.series).toHaveLength(0);
       expect(res.body.kpis.totalAuditEvents.count).toBe(0);
     });
   });

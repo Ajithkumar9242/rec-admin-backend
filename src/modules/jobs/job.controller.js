@@ -170,4 +170,63 @@ export class JobController {
       next(error);
     }
   }
+
+  static async getJobPipeline(req, res, next) {
+    try {
+      const jobId = req.params.jobId || req.params.id;
+      const actorContext = {
+        adminId: req.admin?.id,
+        id: req.admin?.id,
+        email: req.admin?.email,
+        name: req.admin?.name,
+        role: req.admin?.role,
+        companyId: req.admin?.companyId || req.permissions?.companyId || null,
+      };
+      const result = await JobService.getJobPipeline(jobId, req.query, actorContext);
+      return res.status(200).json({
+        success: true,
+        ...result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async updateApplicationStage(req, res, next) {
+    try {
+      const jobId = req.params.jobId || req.params.id;
+      const applicationId = req.params.applicationId;
+      const actorContext = {
+        adminId: req.admin?.id,
+        id: req.admin?.id,
+        email: req.admin?.email,
+        name: req.admin?.name,
+        role: req.admin?.role,
+        companyId: req.admin?.companyId || req.permissions?.companyId || null,
+      };
+      const result = await JobService.updateApplicationStage(jobId, applicationId, req.body, actorContext);
+      return res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async batchUpdateApplicationStage(req, res, next) {
+    try {
+      const jobId = req.params.jobId || req.params.id;
+      const actorContext = {
+        adminId: req.admin?.id,
+        id: req.admin?.id,
+        email: req.admin?.email,
+        name: req.admin?.name,
+        role: req.admin?.role,
+        companyId: req.admin?.companyId || req.permissions?.companyId || null,
+      };
+      const result = await JobService.batchUpdateApplicationStage(jobId, req.body, actorContext);
+      return res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
 }
+

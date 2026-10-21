@@ -6,12 +6,53 @@ import {
   enforceEmployerContactVisibility,
 } from '../configuration/candidateVisibilityPolicy.js';
 import { inspectFileSignature } from '../../lib/fileValidation.js';
+import { logCompanyAction } from '../companies/companyAudit.service.js';
+import { logger } from '../../lib/logger.js';
+import { BusinessEventNotificationService } from '../notifications/businessEvent.service.js';
 
 function createHttpError(message, statusCode) {
   const error = new Error(message);
   error.status = statusCode;
   error.statusCode = statusCode;
   return error;
+}
+
+/**
+ * Deterministically maps a RecruitmentStage to its corresponding ApplicationStatus enum value.
+ */
+export function mapStageToApplicationStatus(stage) {
+  if (!stage) return 'IN_REVIEW';
+
+  const category = stage.category;
+  switch (category) {
+    case 'HIRED':
+      return 'HIRED';
+    case 'REJECTED':
+      return 'REJECTED';
+    case 'OFFER':
+      return 'OFFER';
+    case 'INTERVIEW':
+      return 'INTERVIEW';
+    case 'EVALUATION':
+      return 'SHORTLISTED';
+    case 'SCREENING':
+      return 'IN_REVIEW';
+    case 'SOURCING':
+      return 'SUBMITTED';
+    default:
+      break;
+  }
+
+  const upperName = (stage.name || '').toUpperCase().trim();
+  if (upperName.includes('HIRED') || upperName.includes('HIRE')) return 'HIRED';
+  if (upperName.includes('REJECT')) return 'REJECTED';
+  if (upperName.includes('OFFER')) return 'OFFER';
+  if (upperName.includes('INTERVIEW')) return 'INTERVIEW';
+  if (upperName.includes('SHORTLIST') || upperName.includes('EVALUAT')) return 'SHORTLISTED';
+  if (upperName.includes('SCREEN') || upperName.includes('REVIEW')) return 'IN_REVIEW';
+  if (upperName.includes('SOURC') || upperName.includes('APPLI') || upperName.includes('SUBMIT')) return 'SUBMITTED';
+
+  return 'IN_REVIEW';
 }
 
 export class JobService {
@@ -275,7 +316,7 @@ export class JobService {
       }
     }
 
-    return await prisma.$transaction(async (tx) => {
+    const createdJob = await prisma.$transaction(async (tx) => {
       // 4. Enforce subscription quota when creating directly in active publishing status
       if (['PUBLISHED', 'PENDING_APPROVAL'].includes(status)) {
         await tx.$executeRaw`SELECT 1 FROM companies WHERE id = ${companyId} FOR UPDATE`;
@@ -351,6 +392,35 @@ export class JobService {
 
       return job;
     });
+
+    // Emit centralized business event notification
+    if (createdJob.status === 'PUBLISHED') {
+      BusinessEventNotificationService.notifyJobPublished({
+        job: createdJob,
+        company: createdJob.company,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => {
+        logger.warn({ error: err.message, jobId: createdJob.id }, 'Failed to emit job published notification');
+      });
+    } else if (createdJob.status === 'PENDING_APPROVAL') {
+      BusinessEventNotificationService.notifyJobPendingApproval({
+        job: createdJob,
+        company: createdJob.company,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => {
+        logger.warn({ error: err.message, jobId: createdJob.id }, 'Failed to emit job pending approval notification');
+      });
+    } else if (createdJob.status === 'DRAFT') {
+      BusinessEventNotificationService.notifyJobCreated({
+        job: createdJob,
+        company: createdJob.company,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => {
+        logger.warn({ error: err.message, jobId: createdJob.id }, 'Failed to emit job draft notification');
+      });
+    }
+
+    return createdJob;
   }
 
   /**
@@ -581,7 +651,7 @@ export class JobService {
       }
     }
 
-    return await prisma.$transaction(async (tx) => {
+    const updatedJob = await prisma.$transaction(async (tx) => {
       if (isActivating) {
         await tx.$executeRaw`SELECT 1 FROM companies WHERE id = ${company.id} FOR UPDATE`;
         await EntitlementService.checkEntitlement({
@@ -619,6 +689,36 @@ export class JobService {
 
       return updated;
     });
+
+    // Emit centralized business event notification for job update/publish
+    if (updatedJob.status === 'PUBLISHED' && existingJob.status !== 'PUBLISHED') {
+      BusinessEventNotificationService.notifyJobPublished({
+        job: updatedJob,
+        company: updatedJob.company,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => {
+        logger.warn({ error: err.message, jobId: updatedJob.id }, 'Failed to emit job published notification');
+      });
+    } else if (updatedJob.status === 'PENDING_APPROVAL' && existingJob.status !== 'PENDING_APPROVAL') {
+      BusinessEventNotificationService.notifyJobPendingApproval({
+        job: updatedJob,
+        company: updatedJob.company,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => {
+        logger.warn({ error: err.message, jobId: updatedJob.id }, 'Failed to emit job pending approval notification');
+      });
+    } else if (updatedJob.status !== existingJob.status) {
+      BusinessEventNotificationService.notifyJobStatusChanged({
+        job: updatedJob,
+        status: updatedJob.status,
+        previousStatus: existingJob.status,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => {
+        logger.warn({ error: err.message, jobId: updatedJob.id }, 'Failed to emit job status changed notification');
+      });
+    }
+
+    return updatedJob;
   }
 
   /**
@@ -662,7 +762,7 @@ export class JobService {
       }
     }
 
-    return await prisma.$transaction(async (tx) => {
+    const updatedJob = await prisma.$transaction(async (tx) => {
       if (isActivating) {
         await tx.$executeRaw`SELECT 1 FROM companies WHERE id = ${company.id} FOR UPDATE`;
         await EntitlementService.checkEntitlement({
@@ -689,6 +789,37 @@ export class JobService {
 
       return updated;
     });
+
+    // Emit centralized business event notification
+    if (status === 'PUBLISHED') {
+      BusinessEventNotificationService.notifyJobPublished({
+        job: updatedJob,
+        company: updatedJob.company,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => {
+        logger.warn({ error: err.message, jobId: id }, 'Failed to emit job published notification');
+      });
+    } else if (status === 'PENDING_APPROVAL') {
+      BusinessEventNotificationService.notifyJobPendingApproval({
+        job: updatedJob,
+        company: updatedJob.company,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => {
+        logger.warn({ error: err.message, jobId: id }, 'Failed to emit job pending approval notification');
+      });
+    } else if (['CLOSED', 'SUSPENDED', 'ARCHIVED'].includes(status) || status !== existingJob.status) {
+      BusinessEventNotificationService.notifyJobStatusChanged({
+        job: updatedJob,
+        status,
+        previousStatus: existingJob.status,
+        reason,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => {
+        logger.warn({ error: err.message, jobId: id }, 'Failed to emit job status notification');
+      });
+    }
+
+    return updatedJob;
   }
 
   /**
@@ -813,7 +944,7 @@ export class JobService {
    * Restore a job posting from Trash
    */
   static async restoreJob(id, actorContext = {}) {
-    return await prisma.$transaction(async (tx) => {
+    const restoredResult = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT 1 FROM jobs WHERE id = ${id} FOR UPDATE`;
       const existingJob = await tx.job.findUnique({
         where: { id },
@@ -895,6 +1026,16 @@ export class JobService {
         data: updated,
       };
     });
+
+    // Emit centralized business event notification
+    BusinessEventNotificationService.notifyJobRestored({
+      job: restoredResult.data,
+      actorAdminId: actorContext?.adminId || actorContext?.id,
+    }).catch((err) => {
+      logger.warn({ error: err.message, jobId: id }, 'Failed to emit job restored notification');
+    });
+
+    return restoredResult;
   }
 
   /**
@@ -1329,7 +1470,7 @@ export class JobService {
     });
 
     // 4. Atomic applicant limit check, candidate upsert & application creation
-    const application = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // Row lock job to serialize applications and prevent concurrent applicant-limit bypasses
       await tx.$executeRaw`SELECT 1 FROM jobs WHERE id = ${jobId} FOR UPDATE`;
 
@@ -1399,13 +1540,31 @@ export class JobService {
           job: {
             select: { id: true, title: true, companyId: true },
           },
+          candidate: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
           currentStage: {
             select: { id: true, name: true, category: true },
           },
         },
       });
 
+      if (initialStage) {
+        await tx.applicationStageHistory.create({
+          data: {
+            applicationId: app.id,
+            previousStageId: null,
+            destinationStageId: initialStage.id,
+            actorId: null,
+            notes: 'Initial application submission',
+            reviewerNotes: null,
+            rejectionReason: null,
+          },
+        });
+      }
+
       // If auto-close enabled and this application reached the limit, close now
+      let autoClosed = false;
       if (job.maxApplicantsLimit && job.autoCloseOnLimit) {
         const newCount = await tx.jobApplication.count({ where: { jobId } });
         if (newCount >= job.maxApplicantsLimit) {
@@ -1413,11 +1572,43 @@ export class JobService {
             where: { id: jobId },
             data: { status: 'CLOSED' },
           });
+          autoClosed = true;
         }
       }
 
-      return app;
+      return { app, autoClosed, job };
     });
+
+    const application = result.app;
+
+    // Send notifications outside the transaction boundary
+    try {
+      const candidateName =
+        `${application.candidate?.firstName || ''} ${application.candidate?.lastName || ''}`.trim() ||
+        application.candidate?.email ||
+        'Candidate';
+
+      BusinessEventNotificationService.notifyApplicationReceived({
+        application: {
+          id: application.id,
+          jobId: application.jobId,
+          companyId: result.job?.companyId,
+        },
+        job: result.job,
+        candidateName,
+      }).catch((err) => logger.warn(`[Jobs] Failed to send application received notification: ${err.message}`));
+
+      if (result.autoClosed) {
+        BusinessEventNotificationService.notifyJobStatusChanged({
+          job: result.job,
+          previousStatus: 'ACTIVE',
+          newStatus: 'CLOSED',
+          reason: 'Applicant limit reached',
+        }).catch((err) => logger.warn(`[Jobs] Failed to send auto-close notification: ${err.message}`));
+      }
+    } catch (notifErr) {
+      logger.warn(`[Jobs] Error dispatching application notification: ${notifErr.message}`);
+    }
 
     return {
       success: true,
@@ -1426,6 +1617,480 @@ export class JobService {
       status: application.status,
       currentStage: application.currentStage?.name || 'Screening',
       appliedAt: application.appliedAt,
+    };
+  }
+
+  /**
+   * GET /api/jobs/:jobId/pipeline
+   * Active recruitment-stage columns and paginated applicants grouped by their current stage.
+   */
+  static async getJobPipeline(jobId, query = {}, actorContext = {}) {
+    // 1. Verify job exists and not deleted
+    const job = await prisma.job.findUnique({
+      where: { id: jobId },
+      select: {
+        id: true,
+        title: true,
+        companyId: true,
+        status: true,
+        deletedAt: true,
+        company: {
+          select: {
+            id: true,
+            name: true,
+            companyCode: true,
+            status: true,
+            deletedAt: true,
+          },
+        },
+      },
+    });
+
+    if (!job || job.deletedAt !== null) {
+      throw createHttpError('Job posting not found.', 404);
+    }
+
+    // 2. Tenant isolation check: if actor has companyId, ensure match
+    if (actorContext?.companyId && actorContext.companyId !== job.companyId) {
+      throw createHttpError('Access denied: You are not authorized to view resources of another company.', 403);
+    }
+
+    // 3. Fetch all active recruitment stages ordered by order asc
+    const stages = await prisma.recruitmentStage.findMany({
+      where: {
+        status: 'ACTIVE',
+        deletedAt: null,
+      },
+      orderBy: { order: 'asc' },
+    });
+
+    // 4. Build application query
+    const { page = 1, limit = 50, search } = query;
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Math.max(1, Math.min(100, Number(limit) || 50));
+    const skip = (pageNum - 1) * limitNum;
+
+    const appWhere = {
+      jobId,
+      ...(search
+        ? {
+            OR: [
+              { candidate: { firstName: { contains: search, mode: 'insensitive' } } },
+              { candidate: { lastName: { contains: search, mode: 'insensitive' } } },
+              { candidate: { email: { contains: search, mode: 'insensitive' } } },
+              { candidate: { headline: { contains: search, mode: 'insensitive' } } },
+              { candidate: { currentLocation: { contains: search, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
+
+    // Fetch applications for this job
+    const applications = await prisma.jobApplication.findMany({
+      where: appWhere,
+      orderBy: { appliedAt: 'desc' },
+      include: {
+        candidate: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            fullName: true,
+            email: true,
+            phone: true,
+            headline: true,
+            summary: true,
+            country: true,
+            city: true,
+            currentLocation: true,
+            willingToRelocate: true,
+            resumeUrl: true,
+            resumeFileName: true,
+            createdAt: true,
+          },
+        },
+        currentStage: {
+          select: {
+            id: true,
+            name: true,
+            category: true,
+            order: true,
+          },
+        },
+        stageHistories: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          include: {
+            actor: {
+              select: { id: true, name: true, email: true },
+            },
+          },
+        },
+      },
+    });
+
+    // Group applications by stage
+    const stageMap = new Map();
+    for (const st of stages) {
+      stageMap.set(st.id, []);
+    }
+    const unassigned = [];
+
+    for (const app of applications) {
+      const formattedApp = {
+        ...app,
+        stageHistory: app.stageHistories,
+        lastTransition: app.stageHistories?.[0] || null,
+      };
+      if (app.currentStageId && stageMap.has(app.currentStageId)) {
+        stageMap.get(app.currentStageId).push(formattedApp);
+      } else {
+        unassigned.push(formattedApp);
+      }
+    }
+
+    // Format stage columns with paginated applicants
+    const columns = stages.map((st) => {
+      const stageApps = stageMap.get(st.id) || [];
+      const totalInStage = stageApps.length;
+      const paginatedApps = stageApps.slice(skip, skip + limitNum);
+      return {
+        id: st.id,
+        name: st.name,
+        category: st.category,
+        order: st.order,
+        description: st.description,
+        status: st.status,
+        totalApplicants: totalInStage,
+        applicantCount: totalInStage,
+        applications: paginatedApps,
+        applicants: paginatedApps,
+        pagination: {
+          total: totalInStage,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: Math.ceil(totalInStage / limitNum) || 1,
+        },
+      };
+    });
+
+    return {
+      job: {
+        id: job.id,
+        title: job.title,
+        companyId: job.companyId,
+        status: job.status,
+        company: job.company,
+      },
+      stages: columns,
+      columns,
+      unassigned: {
+        totalApplicants: unassigned.length,
+        applicantCount: unassigned.length,
+        applications: unassigned.slice(skip, skip + limitNum),
+        applicants: unassigned.slice(skip, skip + limitNum),
+      },
+      totalApplications: applications.length,
+      totalApplicants: applications.length,
+      pagination: {
+        total: applications.length,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(applications.length / limitNum) || 1,
+      },
+    };
+  }
+
+  /**
+   * PATCH /api/jobs/:jobId/applications/:applicationId/stage
+   * Atomically move one application to a new stage with terminal state, conflict, and audit protection.
+   */
+  static async updateApplicationStage(jobId, applicationId, payload, actorContext = {}) {
+    const targetStageId = payload.destinationStageId || payload.stageId;
+    const expectedPreviousStageId = payload.expectedPreviousStageId || payload.previousStageId;
+    const notes = payload.notes || payload.reviewerNotes || null;
+    const reviewerNotes = payload.reviewerNotes || payload.notes || null;
+    const rejectionReason = payload.rejectionReason?.trim() || null;
+
+    if (!targetStageId) {
+      throw createHttpError('Destination stage ID is required.', 400);
+    }
+
+    // 1. Validate destination stage outside tx first
+    const destinationStage = await prisma.recruitmentStage.findUnique({
+      where: { id: targetStageId },
+    });
+
+    if (!destinationStage || destinationStage.deletedAt !== null || destinationStage.status !== 'ACTIVE') {
+      throw createHttpError('Destination recruitment stage is invalid, inactive, or archived.', 400);
+    }
+
+    const mappedStatus = mapStageToApplicationStatus(destinationStage);
+
+    // 2. Validate rejection reason if moving to REJECTED
+    if (mappedStatus === 'REJECTED' || destinationStage.category === 'REJECTED') {
+      if (!rejectionReason) {
+        throw createHttpError('A rejection reason is required when rejecting an application.', 400);
+      }
+    }
+
+    // 3. Perform atomic transition with row locking
+    const result = await prisma.$transaction(async (tx) => {
+      // Check job exists and verify company scope
+      const job = await tx.job.findUnique({
+        where: { id: jobId },
+        select: { id: true, title: true, companyId: true, deletedAt: true },
+      });
+
+      if (!job || job.deletedAt !== null) {
+        throw createHttpError('Job posting not found.', 404);
+      }
+
+      if (actorContext?.companyId && actorContext.companyId !== job.companyId) {
+        throw createHttpError('Access denied: You are not authorized to manage resources of another company.', 403);
+      }
+
+      // Row lock the application to prevent lost updates and race conditions
+      await tx.$executeRaw`SELECT 1 FROM job_applications WHERE id = ${applicationId} FOR UPDATE`;
+
+      const application = await tx.jobApplication.findUnique({
+        where: { id: applicationId },
+        include: {
+          currentStage: true,
+        },
+      });
+
+      if (!application) {
+        throw createHttpError('Job application not found.', 404);
+      }
+
+      // Cross-job application ID mismatch check
+      if (application.jobId !== jobId) {
+        throw createHttpError('Application does not belong to the specified job.', 400);
+      }
+
+      // Terminal state protection: HIRED and REJECTED cannot be moved
+      if (
+        application.status === 'HIRED' ||
+        application.status === 'REJECTED' ||
+        application.currentStage?.category === 'HIRED' ||
+        application.currentStage?.category === 'REJECTED'
+      ) {
+        throw createHttpError(
+          `Cannot transition application from terminal state '${application.status}'. Reopening terminal applications is not supported.`,
+          400
+        );
+      }
+
+      // Concurrency conflict check: expectedPreviousStageId
+      if (expectedPreviousStageId && application.currentStageId !== expectedPreviousStageId) {
+        throw createHttpError(
+          `Stage conflict detected: application is currently in stage '${application.currentStage?.name || application.currentStageId}', not expected stage '${expectedPreviousStageId}'.`,
+          409
+        );
+      }
+
+      // Duplicate stage transition check: already in destination stage
+      if (application.currentStageId === targetStageId) {
+        throw createHttpError('Application is already in the requested destination stage.', 409);
+      }
+
+      const previousStageId = application.currentStageId;
+      const previousStageName = application.currentStage?.name || null;
+
+      // Atomically update application status and stage
+      const updatedApplication = await tx.jobApplication.update({
+        where: { id: applicationId },
+        data: {
+          currentStageId: targetStageId,
+          status: mappedStatus,
+        },
+        include: {
+          job: { select: { id: true, title: true, companyId: true } },
+          candidate: { select: { id: true, firstName: true, lastName: true, email: true } },
+          currentStage: { select: { id: true, name: true, category: true, order: true } },
+        },
+      });
+
+      // Insert history entry
+      const historyEntry = await tx.applicationStageHistory.create({
+        data: {
+          applicationId,
+          previousStageId,
+          destinationStageId: targetStageId,
+          actorId: actorContext?.adminId || actorContext?.id || null,
+          notes,
+          reviewerNotes,
+          rejectionReason,
+        },
+      });
+
+      // Record audit log entry in transaction
+      await logCompanyAction({
+        companyId: job.companyId,
+        adminId: actorContext?.adminId || actorContext?.id || null,
+        action: 'APPLICATION_STAGE_CHANGED',
+        actor: actorContext?.name || actorContext?.email || 'ADMIN',
+        details: {
+          applicationId,
+          jobId,
+          candidateId: application.candidateId,
+          previousStageId,
+          previousStageName,
+          destinationStageId: targetStageId,
+          destinationStageName: destinationStage.name,
+          previousStatus: application.status,
+          newStatus: mappedStatus,
+          notes,
+          rejectionReason,
+        },
+        tx,
+      });
+
+      return {
+        application: {
+          ...updatedApplication,
+          stageHistory: [historyEntry],
+          stageHistories: [historyEntry],
+        },
+        history: historyEntry,
+        previousStage: { id: previousStageId, name: previousStageName },
+        destinationStage: { id: destinationStage.id, name: destinationStage.name, category: destinationStage.category },
+      };
+    });
+
+    if (!actorContext?.suppressIndividualNotification) {
+      try {
+        const candidateName =
+          `${result.application.candidate?.firstName || ''} ${result.application.candidate?.lastName || ''}`.trim() ||
+          result.application.candidate?.email ||
+          'Candidate';
+
+        BusinessEventNotificationService.notifyPipelineStageChanged({
+          application: result.application,
+          job,
+          candidateName,
+          previousStageName: result.previousStage.name,
+          newStageName: result.destinationStage.name,
+          newStageCategory: result.destinationStage.category,
+        }).catch((err) => logger.warn(`[Jobs] Failed to send pipeline stage change notification: ${err.message}`));
+      } catch (notifErr) {
+        logger.warn(`[Jobs] Error dispatching pipeline stage change notification: ${notifErr.message}`);
+      }
+    }
+
+    return {
+      success: true,
+      message: `Application successfully moved to stage "${destinationStage.name}".`,
+      data: result.application,
+      application: result.application,
+      history: result.history,
+    };
+  }
+
+  /**
+   * PATCH /api/jobs/:jobId/applications/batch-stage
+   * Move multiple applications with clear per-item success/failure results.
+   */
+  static async batchUpdateApplicationStage(jobId, payload, actorContext = {}) {
+    let items = [];
+    if (Array.isArray(payload.applications) && payload.applications.length > 0) {
+      items = payload.applications.map((app) => ({
+        applicationId: app.applicationId || app.id,
+        destinationStageId: app.destinationStageId || app.stageId || payload.destinationStageId || payload.stageId,
+        expectedPreviousStageId:
+          app.expectedPreviousStageId ||
+          app.previousStageId ||
+          payload.expectedPreviousStageId ||
+          payload.previousStageId,
+        notes: app.notes || app.reviewerNotes || payload.notes || payload.reviewerNotes || null,
+        reviewerNotes: app.reviewerNotes || app.notes || payload.reviewerNotes || payload.notes || null,
+        rejectionReason: app.rejectionReason || payload.rejectionReason || null,
+      }));
+    } else if (Array.isArray(payload.applicationIds) && payload.applicationIds.length > 0) {
+      const commonStageId = payload.destinationStageId || payload.stageId;
+      items = payload.applicationIds.map((id) => ({
+        applicationId: id,
+        destinationStageId: commonStageId,
+        expectedPreviousStageId: payload.expectedPreviousStageId || payload.previousStageId,
+        notes: payload.notes || payload.reviewerNotes || null,
+        reviewerNotes: payload.reviewerNotes || payload.notes || null,
+        rejectionReason: payload.rejectionReason || null,
+      }));
+    }
+
+    if (items.length === 0) {
+      throw createHttpError('No applications provided for batch transition.', 400);
+    }
+
+    const results = [];
+    let succeededCount = 0;
+    let failedCount = 0;
+
+    for (const item of items) {
+      try {
+        if (!item.destinationStageId) {
+          throw createHttpError('Destination stage ID is required for each application item.', 400);
+        }
+        const transitionResult = await JobService.updateApplicationStage(
+          jobId,
+          item.applicationId,
+          item,
+          { ...actorContext, suppressIndividualNotification: true }
+        );
+        succeededCount++;
+        results.push({
+          applicationId: item.applicationId,
+          success: true,
+          currentStageId: item.destinationStageId,
+          status: transitionResult.application.status,
+          message: 'Successfully transitioned stage.',
+        });
+      } catch (err) {
+        failedCount++;
+        results.push({
+          applicationId: item.applicationId,
+          success: false,
+          error: err.message,
+          statusCode: err.status || err.statusCode || 400,
+        });
+      }
+    }
+
+    if (succeededCount > 0) {
+      try {
+        const job = await prisma.job.findFirst({
+          where: { id: jobId },
+          select: { id: true, title: true, companyId: true },
+        });
+
+        const targetStage = items[0]?.destinationStageId
+          ? await prisma.recruitmentStage.findUnique({
+              where: { id: items[0].destinationStageId },
+              select: { name: true },
+            })
+          : null;
+
+        if (job) {
+          BusinessEventNotificationService.notifyBulkPipelineStagesChanged({
+            job,
+            count: succeededCount,
+            newStageName: targetStage?.name || 'New Stage',
+          }).catch((err) => logger.warn(`[Jobs] Failed to send bulk pipeline notification: ${err.message}`));
+        }
+      } catch (bulkErr) {
+        logger.warn(`[Jobs] Error dispatching bulk pipeline notification: ${bulkErr.message}`);
+      }
+    }
+
+    return {
+      success: true,
+      summary: {
+        total: items.length,
+        succeeded: succeededCount,
+        failed: failedCount,
+      },
+      results,
     };
   }
 }

@@ -1,5 +1,6 @@
 import { prisma } from '../../lib/prisma.js';
 import { logger } from '../../lib/logger.js';
+import { BusinessEventNotificationService } from '../notifications/businessEvent.service.js';
 import { env, buildEmployerActivationUrl } from '../../config/env.js';
 import { generateSecureToken, hashToken } from '../../lib/crypto.js';
 import { sendTeamMemberInvitationEmail, sendCompanyAdminInvitationEmail } from '../../lib/mailer.js';
@@ -1321,7 +1322,15 @@ export class TeamService {
       });
     }
 
-    return this.getRoleById(id, actor);
+    const updatedRole = await this.getRoleById(id, actor);
+
+    BusinessEventNotificationService.notifyRoleUpdated({
+      role: updatedRole,
+      actorName: actor?.name || actor?.email || 'Administrator',
+      changesSummary: permissions ? `${permissions.length} permission(s) adjusted` : 'Role details updated',
+    }).catch((err) => logger.warn(`[Teams] Failed to send role updated notification: ${err.message}`));
+
+    return updatedRole;
   }
 
   static async deleteRole(id, actor) {

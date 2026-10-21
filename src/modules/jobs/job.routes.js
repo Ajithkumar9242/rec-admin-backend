@@ -16,6 +16,9 @@ import {
   listPublicJobsSchema,
   applyJobSchema,
   getJobApplicantsSchema,
+  getJobPipelineSchema,
+  updateApplicationStageSchema,
+  batchUpdateApplicationStageSchema,
   updateJobStatusSchema,
   deleteJobSchema,
   restoreJobSchema,
@@ -120,6 +123,30 @@ router.get(
   requirePermission('APPLICATIONS', 'READ'),
   validate(getJobApplicantsSchema),
   JobController.getJobApplicants
+);
+
+// Hiring Pipeline (columns & applicants grouped by stage)
+router.get(
+  '/:jobId/pipeline',
+  requirePermission('APPLICATIONS', 'READ'),
+  validate(getJobPipelineSchema),
+  JobController.getJobPipeline
+);
+
+// Batch application stage transition (declared before single transition)
+router.patch(
+  '/:jobId/applications/batch-stage',
+  requirePermission('APPLICATIONS', 'EDIT'),
+  validate(batchUpdateApplicationStageSchema),
+  JobController.batchUpdateApplicationStage
+);
+
+// Move single application to destination stage
+router.patch(
+  '/:jobId/applications/:applicationId/stage',
+  requirePermission('APPLICATIONS', 'EDIT'),
+  validate(updateApplicationStageSchema),
+  JobController.updateApplicationStage
 );
 
 // Update job

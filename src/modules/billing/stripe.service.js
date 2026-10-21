@@ -17,6 +17,7 @@ import { logBillingAction } from './billingAudit.service.js';
 import { generateNextInvoiceNumber } from './invoiceNumberService.js';
 import { calculateInvoiceTotals } from './taxService.js';
 import { calculateSubscriptionEndDate } from './billingDateUtils.js';
+import { BusinessEventNotificationService } from '../notifications/businessEvent.service.js';
 
 export class StripeNotConfiguredError extends Error {
   constructor(message = 'Stripe payment provider is not configured. Secret key or webhook secret is missing.') {
@@ -494,7 +495,7 @@ class StripeService {
 
     const amountPaid = session.amount_total ? session.amount_total / 100 : Number(invoice.grossTotal);
 
-    await prisma.$transaction(async (tx) => {
+    const paymentResult = await prisma.$transaction(async (tx) => {
       const payment = await tx.payment.create({
         data: {
           invoiceId: invoice.id,
@@ -536,7 +537,21 @@ class StripeService {
         },
         tx,
       });
+
+      return { payment };
     });
+
+    if (paymentResult?.payment) {
+      BusinessEventNotificationService.notifyPaymentSucceeded({
+        payment: {
+          id: paymentResult.payment.id,
+          amount: amountPaid,
+          currency: (session.currency || invoice.currency).toUpperCase(),
+        },
+        company: { id: invoice.companyId },
+        invoiceNumber: invoice.invoiceNumber,
+      }).catch((err) => logger.warn(`[Stripe] Failed to send invoice checkout payment notification: ${err.message}`));
+    }
   }
 
   async _handleCheckoutSessionCompleted(session) {
@@ -556,7 +571,7 @@ class StripeService {
     const plan = await prisma.plan.findUnique({ where: { id: planId } });
     if (!plan) return;
 
-    await prisma.$transaction(async (tx) => {
+    const checkoutResult = await prisma.$transaction(async (tx) => {
       let sub;
       const startDate = new Date();
       const endDate = calculateSubscriptionEndDate(startDate, plan.billingInterval);
@@ -627,7 +642,7 @@ class StripeService {
       });
 
       // Record payment
-      await tx.payment.create({
+      const payment = await tx.payment.create({
         data: {
           invoiceId: invoice.id,
           amount: totals.grossTotal,
@@ -647,7 +662,27 @@ class StripeService {
         details: { sessionId: session.id, planId, companyId, status: 'ACTIVE' },
         tx,
       });
+
+      return { sub, company, invoice, payment };
     });
+
+    if (checkoutResult) {
+      BusinessEventNotificationService.notifySubscriptionCreated({
+        subscription: checkoutResult.sub,
+        company: checkoutResult.company,
+        plan,
+      }).catch((err) => logger.warn(`[Stripe] Failed to send subscription created notification: ${err.message}`));
+
+      BusinessEventNotificationService.notifyPaymentSucceeded({
+        payment: {
+          id: checkoutResult.payment.id,
+          amount: checkoutResult.invoice.grossTotal,
+          currency: plan.currency,
+        },
+        company: checkoutResult.company,
+        invoiceNumber: checkoutResult.invoice.invoiceNumber,
+      }).catch((err) => logger.warn(`[Stripe] Failed to send payment succeeded notification: ${err.message}`));
+    }
   }
 
   async _handleInvoicePaymentSucceeded(stripeInvoice) {
@@ -660,6 +695,9 @@ class StripeService {
     });
 
     if (!sub) return;
+
+    let invoiceNumber = null;
+    const amountPaid = Number(stripeInvoice.amount_paid || 0) / 100;
 
     await prisma.$transaction(async (tx) => {
       // Re-activate or advance next billing date
@@ -678,9 +716,8 @@ class StripeService {
         where: { stripeInvoiceId: stripeInvoice.id },
       });
 
-      const amountPaid = Number(stripeInvoice.amount_paid || 0) / 100;
-
       if (existingInv) {
+        invoiceNumber = existingInv.invoiceNumber;
         await tx.invoice.update({
           where: { id: existingInv.id },
           data: { status: 'PAID', paidDate: new Date() },
@@ -699,6 +736,7 @@ class StripeService {
         });
       } else {
         const invNum = await generateNextInvoiceNumber(tx);
+        invoiceNumber = invNum;
         const totals = calculateInvoiceTotals(sub.price, null, sub.company.country);
 
         const newInv = await tx.invoice.create({
@@ -742,6 +780,16 @@ class StripeService {
         tx,
       });
     });
+
+    BusinessEventNotificationService.notifyPaymentSucceeded({
+      payment: {
+        id: stripeInvoice.id,
+        amount: amountPaid,
+        currency: (stripeInvoice.currency || 'EUR').toUpperCase(),
+      },
+      company: sub.company,
+      invoiceNumber: invoiceNumber || stripeInvoice.number || 'Invoice',
+    }).catch((err) => logger.warn(`[Stripe] Failed to send invoice payment succeeded notification: ${err.message}`));
   }
 
   async _handleInvoicePaymentFailed(stripeInvoice) {
@@ -765,6 +813,14 @@ class StripeService {
         actor: 'STRIPE_WEBHOOK',
         details: { stripeInvoiceId: stripeInvoice.id },
       });
+
+      BusinessEventNotificationService.notifyPaymentFailed({
+        company: { id: sub.companyId },
+        invoiceId: stripeInvoice.id,
+        amount: Number(stripeInvoice.amount_due || 0) / 100,
+        currency: (stripeInvoice.currency || 'EUR').toUpperCase(),
+        reason: 'Payment failed via Stripe webhook',
+      }).catch((err) => logger.warn(`[Stripe] Failed to send payment failed notification: ${err.message}`));
     }
   }
 
@@ -790,6 +846,12 @@ class StripeService {
         actor: 'STRIPE_WEBHOOK',
         details: { stripeSubscriptionId: stripeSub.id },
       });
+
+      BusinessEventNotificationService.notifySubscriptionCancelled({
+        subscription: sub,
+        company: { id: sub.companyId },
+        reason: 'Cancelled via Stripe dashboard/webhook',
+      }).catch((err) => logger.warn(`[Stripe] Failed to send subscription cancelled notification: ${err.message}`));
     }
   }
 
@@ -820,6 +882,13 @@ class StripeService {
           nextBillingDate: currentPeriodEnd,
         },
       });
+
+      BusinessEventNotificationService.notifySubscriptionUpdated({
+        subscription: sub,
+        company: { id: sub.companyId },
+        previousPlanName: sub.status,
+        newPlanName: mappedStatus,
+      }).catch((err) => logger.warn(`[Stripe] Failed to send subscription updated notification: ${err.message}`));
     }
   }
 
@@ -850,6 +919,18 @@ class StripeService {
         actor: 'STRIPE_WEBHOOK',
         details: { chargeId: charge.id, refundedAmount },
       });
+
+      const inv = await prisma.invoice.findUnique({
+        where: { id: payment.invoiceId },
+        select: { companyId: true },
+      });
+
+      BusinessEventNotificationService.notifyRefundCompleted({
+        payment,
+        company: { id: inv?.companyId },
+        amount: refundedAmount,
+        currency: payment.currency,
+      }).catch((err) => logger.warn(`[Stripe] Failed to send refund completed notification: ${err.message}`));
     }
   }
 

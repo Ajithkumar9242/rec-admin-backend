@@ -398,7 +398,7 @@ export class CandidateController {
 
   static async updateCandidateStatus(req, res, next) {
     try {
-      const candidate = await CandidateService.updateCandidateStatus(req.params.id, req.body.status);
+      const candidate = await CandidateService.updateCandidateStatus(req.params.id, req.body.status, req.admin?.id);
       res.status(200).json({
         success: true,
         data: candidate,

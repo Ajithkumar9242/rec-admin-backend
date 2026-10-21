@@ -58,6 +58,9 @@ model Admin {
   platformConfigAuditLogs PlatformConfigAuditLog[]
   companyAuditLogs    CompanyAuditLog[]
   teamMembers         TeamMember[]
+  stageHistories      ApplicationStageHistory[]
+  deviceTokens        AdminDeviceToken[]
+  notifications       AdminNotification[]
 
   @@map("admins")
 }
@@ -470,6 +473,8 @@ model RecruitmentStage {
   deletedBy   String?
 
   jobApplications JobApplication[]
+  previousStageHistories    ApplicationStageHistory[] @relation("StageHistoryPreviousStage")
+  destinationStageHistories ApplicationStageHistory[] @relation("StageHistoryDestinationStage")
 
   @@index([order])
   @@index([status])
@@ -861,12 +866,37 @@ model JobApplication {
   appliedAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 
+  stageHistories ApplicationStageHistory[]
+
   @@unique([jobId, candidateId])
   @@index([jobId])
   @@index([candidateId])
   @@index([currentStageId])
   @@index([status])
   @@map("job_applications")
+}
+
+model ApplicationStageHistory {
+  id                 String            @id @default(uuid())
+  applicationId      String
+  application        JobApplication    @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  previousStageId    String?
+  previousStage      RecruitmentStage? @relation("StageHistoryPreviousStage", fields: [previousStageId], references: [id], onDelete: SetNull)
+  destinationStageId String
+  destinationStage   RecruitmentStage  @relation("StageHistoryDestinationStage", fields: [destinationStageId], references: [id], onDelete: Restrict)
+  actorId            String?
+  actor              Admin?            @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  notes              String?
+  reviewerNotes      String?
+  rejectionReason    String?
+  createdAt          DateTime          @default(now())
+
+  @@index([applicationId])
+  @@index([destinationStageId])
+  @@index([previousStageId])
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("application_stage_histories")
 }
 
 // ----------------------------------------------------
@@ -948,3 +978,48 @@ model TeamMember {
   @@index([roleId])
   @@map("team_members")
 }
+
+enum DevicePlatform {
+  WEB
+  IOS
+  ANDROID
+}
+
+model AdminDeviceToken {
+  id        String         @id @default(uuid())
+  adminId   String
+  admin     Admin          @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  token     String         @unique
+  platform  DevicePlatform @default(WEB)
+  userAgent String?
+  createdAt DateTime       @default(now())
+  lastUsedAt DateTime      @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@index([adminId])
+  @@index([platform])
+  @@map("admin_device_tokens")
+}
+
+model AdminNotification {
+  id          String    @id @default(uuid())
+  adminId     String
+  admin       Admin     @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  title       String
+  body        String
+  category    String    @default("GENERAL")
+  deepLinkUrl String?
+  isRead      Boolean   @default(false)
+  readAt      DateTime?
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([adminId])
+  @@index([adminId, isRead])
+  @@index([adminId, createdAt])
+  @@index([isRead])
+  @@index([createdAt])
+  @@map("admin_notifications")
+}
+

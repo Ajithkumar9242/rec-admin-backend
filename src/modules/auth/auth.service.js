@@ -1,6 +1,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../lib/logger.js';
+import { BusinessEventNotificationService } from '../notifications/businessEvent.service.js';
 import {
   hashPassword,
   verifyPassword,
@@ -138,6 +139,12 @@ export class AuthService {
           userAgent,
           details: { failedAttempts, lockedUntil },
         });
+
+        BusinessEventNotificationService.notifyAccountLocked({
+          admin,
+          failedAttempts,
+          lockoutMinutes: env.ACCOUNT_LOCKOUT_MINUTES,
+        }).catch((err) => logger.warn(`[Auth] Failed to send account locked notification: ${err.message}`));
       }
 
       await this.recordAuditLog({

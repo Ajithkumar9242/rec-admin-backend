@@ -207,6 +207,11 @@ export const env = {
   ),
   CANDIDATE_ACTIVATION_PATH: process.env.CANDIDATE_ACTIVATION_PATH || '/activate',
   CANDIDATE_INVITATION_EXPIRES_HOURS: parseInt(process.env.CANDIDATE_INVITATION_EXPIRES_HOURS || '48', 10),
+
+  // Firebase Cloud Messaging (FCM) Configuration (Optional)
+  FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || '',
+  FIREBASE_CLIENT_EMAIL: process.env.FIREBASE_CLIENT_EMAIL || '',
+  FIREBASE_PRIVATE_KEY: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
 };
 
 export function buildEmployerActivationUrl(rawToken, options = {}) {

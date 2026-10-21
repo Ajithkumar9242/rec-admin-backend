@@ -206,12 +206,15 @@ export function requirePermission(module, action) {
           req.query?.companyId;
 
         // Verify tenant scope for job resources
-        if (!targetCompanyId && req.baseUrl?.includes('jobs') && req.params.id) {
-          const job = await prisma.job.findUnique({
-            where: { id: req.params.id },
-            select: { companyId: true },
-          });
-          if (job) targetCompanyId = job.companyId;
+        if (!targetCompanyId && req.baseUrl?.includes('jobs')) {
+          const effectiveJobId = req.params.jobId || req.params.id;
+          if (effectiveJobId) {
+            const job = await prisma.job.findUnique({
+              where: { id: effectiveJobId },
+              select: { companyId: true },
+            });
+            if (job) targetCompanyId = job.companyId;
+          }
         }
 
         // Verify tenant scope for team resources

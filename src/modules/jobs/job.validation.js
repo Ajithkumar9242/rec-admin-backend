@@ -267,3 +267,97 @@ export const applyJobSchema = {
     resumeSize: z.coerce.number().optional(),
   }),
 };
+
+export const getJobPipelineSchema = {
+  params: z
+    .object({
+      jobId: z.string().uuid('Invalid job ID format').optional(),
+      id: z.string().uuid('Invalid job ID format').optional(),
+    })
+    .refine((p) => p.jobId || p.id, {
+      message: 'Job ID is required',
+      path: ['jobId'],
+    }),
+  query: z
+    .object({
+      page: z.coerce.number().int().min(1).default(1),
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      search: z.string().trim().optional(),
+    })
+    .optional(),
+};
+
+export const updateApplicationStageSchema = {
+  params: z
+    .object({
+      jobId: z.string().uuid('Invalid job ID format').optional(),
+      id: z.string().uuid('Invalid job ID format').optional(),
+      applicationId: z.string().uuid('Invalid application ID format'),
+    })
+    .refine((p) => p.jobId || p.id, {
+      message: 'Job ID is required',
+      path: ['jobId'],
+    }),
+  body: z
+    .object({
+      destinationStageId: z.string().uuid('Invalid stage ID format').optional(),
+      stageId: z.string().uuid('Invalid stage ID format').optional(),
+      expectedPreviousStageId: z.string().uuid('Invalid stage ID format').optional().nullable(),
+      previousStageId: z.string().uuid('Invalid stage ID format').optional().nullable(),
+      notes: z.string().trim().max(2000).optional().nullable(),
+      reviewerNotes: z.string().trim().max(2000).optional().nullable(),
+      rejectionReason: z.string().trim().max(2000).optional().nullable(),
+    })
+    .refine((data) => Boolean(data.destinationStageId || data.stageId), {
+      message: 'Destination stage ID is required',
+      path: ['destinationStageId'],
+    }),
+};
+
+export const batchUpdateApplicationStageSchema = {
+  params: z
+    .object({
+      jobId: z.string().uuid('Invalid job ID format').optional(),
+      id: z.string().uuid('Invalid job ID format').optional(),
+    })
+    .refine((p) => p.jobId || p.id, {
+      message: 'Job ID is required',
+      path: ['jobId'],
+    }),
+  body: z
+    .object({
+      destinationStageId: z.string().uuid('Invalid stage ID format').optional(),
+      stageId: z.string().uuid('Invalid stage ID format').optional(),
+      expectedPreviousStageId: z.string().uuid('Invalid stage ID format').optional().nullable(),
+      previousStageId: z.string().uuid('Invalid stage ID format').optional().nullable(),
+      applicationIds: z.array(z.string().uuid('Invalid application ID format')).optional(),
+      applications: z
+        .array(
+          z.object({
+            applicationId: z.string().uuid('Invalid application ID format').optional(),
+            id: z.string().uuid('Invalid application ID format').optional(),
+            destinationStageId: z.string().uuid('Invalid stage ID format').optional(),
+            stageId: z.string().uuid('Invalid stage ID format').optional(),
+            expectedPreviousStageId: z.string().uuid('Invalid stage ID format').optional().nullable(),
+            previousStageId: z.string().uuid('Invalid stage ID format').optional().nullable(),
+            notes: z.string().trim().max(2000).optional().nullable(),
+            reviewerNotes: z.string().trim().max(2000).optional().nullable(),
+            rejectionReason: z.string().trim().max(2000).optional().nullable(),
+          })
+        )
+        .optional(),
+      notes: z.string().trim().max(2000).optional().nullable(),
+      reviewerNotes: z.string().trim().max(2000).optional().nullable(),
+      rejectionReason: z.string().trim().max(2000).optional().nullable(),
+    })
+    .refine(
+      (data) =>
+        (Array.isArray(data.applicationIds) && data.applicationIds.length > 0) ||
+        (Array.isArray(data.applications) && data.applications.length > 0),
+      {
+        message: 'Must provide either applicationIds or applications array',
+        path: ['applicationIds'],
+      }
+    ),
+};
+

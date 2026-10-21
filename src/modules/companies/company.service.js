@@ -20,6 +20,7 @@ import {
 } from '../../lib/mailer.js';
 import { logCompanyAction } from './companyAudit.service.js';
 import { prepareSoftDeletePayload, activeRecordsFilter } from '../../lib/softDelete.js';
+import { BusinessEventNotificationService } from '../notifications/businessEvent.service.js';
 
 export class CompanyService {
   /**
@@ -424,6 +425,14 @@ export class CompanyService {
       }
     }
 
+    // Emit centralized business event notification
+    BusinessEventNotificationService.notifyCompanyCreated({
+      company,
+      actorAdminId: actorAdmin?.id,
+    }).catch((err) => {
+      logger.warn({ error: err.message, companyId: company.id }, 'Failed to emit company created notification');
+    });
+
     return {
       company,
       invitationSent,
@@ -609,6 +618,17 @@ export class CompanyService {
       },
     });
 
+    // Emit centralized business event notification
+    BusinessEventNotificationService.notifyCompanyStatusChanged({
+      company: updated,
+      status: 'INACTIVE',
+      previousStatus: existing.status,
+      reason: 'Company moved to Trash (30-day retention)',
+      actorAdminId: actorAdmin?.id,
+    }).catch((err) => {
+      logger.warn({ error: err.message, companyId: id }, 'Failed to emit company moved to trash notification');
+    });
+
     return {
       success: true,
       message: `Company "${existing.name}" moved to Trash with 30-day retention.`,
@@ -691,6 +711,16 @@ export class CompanyService {
         data: updated,
       };
     });
+
+    // Emit centralized business event notification
+    BusinessEventNotificationService.notifyCompanyRestored({
+      company: result.data,
+      actorAdminId: actorAdmin?.id,
+    }).catch((err) => {
+      logger.warn({ error: err.message, companyId: id }, 'Failed to emit company restored notification');
+    });
+
+    return result;
   }
 
   /**
@@ -757,10 +787,19 @@ export class CompanyService {
       await sendCompanySuspensionEmail({
         to: company.email,
         recipientName: company.name,
-        companyName: company.name,
         reason,
       });
     }
+
+    // Emit centralized business event notification
+    BusinessEventNotificationService.notifyCompanyStatusChanged({
+      company: updated,
+      status,
+      reason,
+      actorAdminId: actorAdmin?.id,
+    }).catch((err) => {
+      logger.warn({ error: err.message, companyId: id }, 'Failed to emit company status notification');
+    });
 
     return updated;
   }
@@ -827,6 +866,17 @@ export class CompanyService {
         });
       }
     }
+
+    // Emit centralized business event notification
+    BusinessEventNotificationService.notifyCompanyStatusChanged({
+      company: updated,
+      status: newStatus,
+      decision,
+      reason: rejectionReason,
+      actorAdminId: actorAdmin?.id,
+    }).catch((err) => {
+      logger.warn({ error: err.message, companyId: id }, 'Failed to emit company review notification');
+    });
 
     return updated;
   }
@@ -1715,5 +1765,16 @@ export class CompanyService {
         },
       };
     });
+
+    // Emit centralized business event notification
+    BusinessEventNotificationService.notifyCompanyInvitationAccepted({
+      companyId: result.data.companyId,
+      userEmail: result.data.email,
+      userName: `${firstName || ''} ${lastName || ''}`.trim() || result.data.email,
+    }).catch((err) => {
+      logger.warn({ error: err.message, companyId: result.data.companyId }, 'Failed to emit company invitation accepted notification');
+    });
+
+    return result;
   }
 }

@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { prisma } from '../../lib/prisma.js';
 import { logger } from '../../lib/logger.js';
+import { BusinessEventNotificationService } from '../notifications/businessEvent.service.js';
 import { env, buildCandidateActivationUrl } from '../../config/env.js';
 import {
   hashPassword,
@@ -161,6 +162,11 @@ export class CandidateService {
     });
 
     const { passwordHash: _p, passwordResetTokenHash: _rt, verificationTokenHash: _vt, ...safeCandidate } = candidate;
+
+    BusinessEventNotificationService.notifyCandidateRegistered({
+      candidate: safeCandidate,
+    }).catch((err) => logger.warn(`[Candidates] Failed to send registration notification: ${err.message}`));
+
     return safeCandidate;
   }
 
@@ -1096,6 +1102,11 @@ export class CandidateService {
 
       const { passwordHash: _p, passwordResetTokenHash: _rt, verificationTokenHash: _vt, invitationTokenHash: _it, ...safeCandidate } = finalRecord;
 
+      BusinessEventNotificationService.notifyCandidateCreatedByAdmin({
+        candidate: safeCandidate,
+        actorAdminId: actorContext.adminId || actorContext.id,
+      }).catch((err) => logger.warn(`[Candidates] Failed to send candidate created by admin notification: ${err.message}`));
+
       return {
         candidate: safeCandidate,
         alreadyExists: true,
@@ -1173,6 +1184,11 @@ export class CandidateService {
     });
 
     const { passwordHash: _p, passwordResetTokenHash: _rt, verificationTokenHash: _vt, invitationTokenHash: _it, ...safeCandidate } = refreshedCandidate;
+
+    BusinessEventNotificationService.notifyCandidateCreatedByAdmin({
+      candidate: safeCandidate,
+      actorAdminId: actorContext.adminId || actorContext.id,
+    }).catch((err) => logger.warn(`[Candidates] Failed to send candidate created by admin notification: ${err.message}`));
 
     return {
       candidate: safeCandidate,
@@ -1427,7 +1443,7 @@ export class CandidateService {
   /**
    * Admin: Update candidate status
    */
-  static async updateCandidateStatus(id, status) {
+  static async updateCandidateStatus(id, status, actorAdminId = null) {
     const candidate = await prisma.candidate.findUnique({ where: { id } });
     if (!candidate || candidate.deletedAt !== null) {
       throw createHttpError('Candidate not found.', 404);
@@ -1439,6 +1455,14 @@ export class CandidateService {
     });
 
     const { passwordHash, passwordResetTokenHash, verificationTokenHash, invitationTokenHash, ...safeCandidate } = updated;
+
+    BusinessEventNotificationService.notifyCandidateStatusChanged({
+      candidate: safeCandidate,
+      status,
+      previousStatus: candidate.status,
+      actorAdminId,
+    }).catch((err) => logger.warn(`[Candidates] Failed to send candidate status notification: ${err.message}`));
+
     return safeCandidate;
   }
 

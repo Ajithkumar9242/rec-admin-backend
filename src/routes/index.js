@@ -7,6 +7,7 @@ import companyRoutes from '../modules/companies/company.routes.js';
 import jobRoutes from '../modules/jobs/job.routes.js';
 import candidateRoutes from '../modules/candidates/candidate.routes.js';
 import { teamRouter, roleRouter } from '../modules/teams/team.routes.js';
+import notificationRoutes from '../modules/notifications/notification.routes.js';
 
 const router = Router();
 
@@ -29,5 +30,7 @@ router.use('/jobs', jobRoutes);
 router.use('/candidates', candidateRoutes);
 router.use('/teams', teamRouter);
 router.use('/roles', roleRouter);
+router.use('/notifications', notificationRoutes);
 
 export default router;
+

@@ -13,6 +13,7 @@ import { generateNextInvoiceNumber } from './invoiceNumberService.js';
 import { logBillingAction } from './billingAudit.service.js';
 import { EntitlementService, QuotaExceededError, SubscriptionError } from './entitlement.service.js';
 import { stripeService } from './stripe.service.js';
+import { BusinessEventNotificationService } from '../notifications/businessEvent.service.js';
 
 export class BillingController {
   // ==========================================
@@ -581,6 +582,12 @@ export class BillingController {
         return created;
       });
 
+      BusinessEventNotificationService.notifySubscriptionCreated({
+        subscription,
+        company: subscription.company,
+        plan: subscription.plan,
+      }).catch((err) => logger.warn(`[Billing] Failed to send subscription created notification: ${err.message}`));
+
       return res.status(201).json({
         success: true,
         message: 'Subscription created and invoice generated successfully.',
@@ -855,6 +862,13 @@ export class BillingController {
         return sub;
       });
 
+      BusinessEventNotificationService.notifySubscriptionUpdated({
+        subscription: updated,
+        company: subscription.company,
+        previousPlanName: subscription.plan.name,
+        newPlanName: newPlan.name,
+      }).catch((err) => logger.warn(`[Billing] Failed to send subscription updated notification: ${err.message}`));
+
       return res.status(200).json({
         success: true,
         message: `Subscription successfully ${isUpgrade ? 'upgraded' : 'downgraded'} to ${newPlan.name}.`,
@@ -897,6 +911,17 @@ export class BillingController {
         actor: req.admin?.email || 'ADMIN',
         details: { reason: reason || 'No reason provided' },
       });
+
+      const company = await prisma.company.findUnique({
+        where: { id: subscription.companyId },
+        select: { id: true, name: true },
+      });
+
+      BusinessEventNotificationService.notifySubscriptionCancelled({
+        subscription: updated,
+        company,
+        reason: reason || 'Cancelled by administrator',
+      }).catch((err) => logger.warn(`[Billing] Failed to send subscription cancelled notification: ${err.message}`));
 
       return res.status(200).json({
         success: true,
@@ -1174,6 +1199,17 @@ export class BillingController {
 
         return createdPayment;
       });
+
+      const company = await prisma.company.findUnique({
+        where: { id: invoice.companyId },
+        select: { id: true, name: true },
+      });
+
+      BusinessEventNotificationService.notifyPaymentSucceeded({
+        payment,
+        company,
+        invoiceNumber: invoice.invoiceNumber,
+      }).catch((err) => logger.warn(`[Billing] Failed to send payment succeeded notification: ${err.message}`));
 
       return res.status(201).json({
         success: true,

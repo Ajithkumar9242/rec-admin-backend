@@ -58,6 +58,12 @@ export class AdminController {
         companyLogs,
         billingLogs,
         configLogs,
+        jobSeriesRows,
+        candidateSeriesRows,
+        jobStatusGroups,
+        candidateStatusGroups,
+        totalJobsCount,
+        totalCandidatesCount,
       ] = await Promise.all([
         prisma.admin.count(),
         prisma.admin.count({ where: { status: 'ACTIVE' } }),
@@ -141,12 +147,67 @@ export class AdminController {
             },
           },
         }),
+        prisma.$queryRaw`
+          SELECT 
+            DATE_TRUNC(${unit}, "createdAt") AS bucket,
+            COUNT(*)::int AS count
+          FROM "jobs"
+          WHERE "deletedAt" IS NULL AND "createdAt" >= ${fromDate} AND "createdAt" <= ${toDate}
+          GROUP BY bucket
+          ORDER BY bucket ASC;
+        `,
+        prisma.$queryRaw`
+          SELECT 
+            DATE_TRUNC(${unit}, "createdAt") AS bucket,
+            COUNT(*)::int AS count
+          FROM "candidates"
+          WHERE "deletedAt" IS NULL AND "createdAt" >= ${fromDate} AND "createdAt" <= ${toDate}
+          GROUP BY bucket
+          ORDER BY bucket ASC;
+        `,
+        prisma.job.groupBy({
+          by: ['status'],
+          where: { deletedAt: null },
+          _count: { _all: true },
+        }),
+        prisma.candidate.groupBy({
+          by: ['status'],
+          where: { deletedAt: null },
+          _count: { _all: true },
+        }),
+        prisma.job.count({ where: { deletedAt: null } }),
+        prisma.candidate.count({ where: { deletedAt: null } }),
       ]);
 
       const formattedSeries = (seriesRows || []).map((row) => ({
         bucket: row.bucket instanceof Date ? row.bucket.toISOString() : String(row.bucket),
         count: Number(row.count) || 0,
       }));
+
+      const formattedJobSeries = (jobSeriesRows || []).map((row) => ({
+        bucket: row.bucket instanceof Date ? row.bucket.toISOString() : String(row.bucket),
+        count: Number(row.count) || 0,
+      }));
+
+      const formattedCandidateSeries = (candidateSeriesRows || []).map((row) => ({
+        bucket: row.bucket instanceof Date ? row.bucket.toISOString() : String(row.bucket),
+        count: Number(row.count) || 0,
+      }));
+
+      const jobCounts = (jobStatusGroups || []).reduce((acc, curr) => {
+        acc[curr.status] = curr._count._all;
+        return acc;
+      }, {});
+      const activeJobsCount = jobCounts.PUBLISHED || 0;
+      const inactiveJobsCount = (totalJobsCount || 0) - activeJobsCount;
+
+      const candidateCounts = (candidateStatusGroups || []).reduce((acc, curr) => {
+        acc[curr.status] = curr._count._all;
+        return acc;
+      }, {});
+      const activeCandidatesCount = candidateCounts.ACTIVE || 0;
+      const pendingCandidatesCount = candidateCounts.PENDING_APPROVAL || 0;
+      const inactiveCandidatesCount = (candidateCounts.INACTIVE || 0) + (candidateCounts.SUSPENDED || 0);
 
       // Normalize activity logs into a unified platform activity stream
       const normalizedAuth = (authLogs || []).map((log) => ({
@@ -231,18 +292,16 @@ export class AdminController {
         },
         kpis: {
           activeJobs: {
-            count: null,
-            connected: false,
+            count: activeJobsCount,
+            connected: true,
             module: 'Jobs',
-            status: 'NOT_CONNECTED',
-            message: 'Jobs module scheduled for Phase 3',
+            label: 'Active Jobs',
           },
           inactiveJobs: {
-            count: null,
-            connected: false,
+            count: inactiveJobsCount,
+            connected: true,
             module: 'Jobs',
-            status: 'NOT_CONNECTED',
-            message: 'Jobs module scheduled for Phase 3',
+            label: 'Inactive Jobs',
           },
           totalCompanies: {
             count: null,
@@ -252,11 +311,10 @@ export class AdminController {
             message: 'Employers module scheduled for Phase 3',
           },
           totalCandidates: {
-            count: null,
-            connected: false,
+            count: totalCandidatesCount,
+            connected: true,
             module: 'Candidates',
-            status: 'NOT_CONNECTED',
-            message: 'Candidates module scheduled for Phase 3',
+            label: 'Total Candidates',
           },
           totalAdmins: {
             count: totalAdmins,
@@ -288,16 +346,27 @@ export class AdminController {
             series: formattedSeries,
           },
           jobPostings: {
-            connected: false,
+            connected: true,
             label: 'Job Postings',
-            series: [],
-            message: 'Jobs table not yet persisted',
+            dateField: 'createdAt',
+            groupBy: unit,
+            series: formattedJobSeries,
+            total: totalJobsCount,
+            active: activeJobsCount,
+            inactive: inactiveJobsCount,
+            counts: jobCounts,
           },
           candidateRegistrations: {
-            connected: false,
+            connected: true,
             label: 'Candidate Registrations',
-            series: [],
-            message: 'Candidates table not yet persisted',
+            dateField: 'createdAt',
+            groupBy: unit,
+            series: formattedCandidateSeries,
+            total: totalCandidatesCount,
+            active: activeCandidatesCount,
+            pending: pendingCandidatesCount,
+            inactive: inactiveCandidatesCount,
+            counts: candidateCounts,
           },
           employerRegistrations: {
             connected: false,
